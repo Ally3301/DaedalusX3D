@@ -32,6 +32,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "Core/Registers.h"
 #include "Core/CPU.h"			// Try to remove this cyclic dependency
+#include "Core/Memory.h"
 #include "Core/R4300.h"
 #include "Core/Interrupt.h"
 
@@ -47,6 +48,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "OSHLE/ultra_R4300.h"
 #include "OSHLE/patch.h"
+#ifdef DAEDALUS_CTR_XRAY
+#include "SysCTR/Utility/PerfProfilerCTR.h"
+#endif
 
 
 //#define IMMEDIATE_COUNTER_UPDATE
@@ -90,6 +94,9 @@ CFragment::CFragment( CCodeBufferManager * p_manager,
 ,	mOutputLength( 0 )
 ,	mFragmentFunctionLength( 0 )
 ,	mpIndirectExitMap( need_indirect_exit_map ? new CIndirectExitMap : nullptr )
+,	mIsOshle( false )
+,	mHasUncoveredAddr( false )
+,	mEvicted( false )
 #ifdef FRAGMENT_RETAIN_ADDITIONAL_INFO
 ,	mHitCount( 0 )
 ,	mTraceBuffer( trace )
@@ -103,6 +110,10 @@ CFragment::CFragment( CCodeBufferManager * p_manager,
 #ifdef FRAGMENT_RETAIN_ADDITIONAL_INFO
 	mRegisterUsage = register_usage;
 #endif
+	for (std::vector<STraceEntry>::const_iterator it = trace.begin(); it != trace.end(); ++it)
+	{
+		AddCoveredRange( it->Address, sizeof(OpCode) );
+	}
 
 	Assemble( p_manager, exit_address, trace, branch_details, register_usage );
 }
@@ -118,6 +129,9 @@ CFragment::CFragment(CCodeBufferManager * p_manager, u32 entry_address,
 	,	mOutputLength( 0 )
 	,	mFragmentFunctionLength( 0 )
 	,	mpIndirectExitMap( new CIndirectExitMap )
+	,	mIsOshle( true )
+	,	mHasUncoveredAddr( false )
+	,	mEvicted( false )
 #ifdef FRAGMENT_RETAIN_ADDITIONAL_INFO
 	,	mHitCount( 0 )
 	,	mTraceBuffer( nullptr )
@@ -128,6 +142,7 @@ CFragment::CFragment(CCodeBufferManager * p_manager, u32 entry_address,
 	,	mpCache( nullptr )
 #endif
 {
+	AddCoveredRange( entry_address, mInputLength );
 	Assemble(p_manager, CCodeLabel(function_Ptr));
 }
 #endif
@@ -137,6 +152,81 @@ CFragment::CFragment(CCodeBufferManager * p_manager, u32 entry_address,
 CFragment::~CFragment()
 {
 	delete mpIndirectExitMap;
+}
+
+void CFragment::AddCoveredRange( u32 address, u32 length )
+{
+	if (length == 0)
+		return;
+
+	static const u32 RDRAM_SIZE = 8u * 1024u * 1024u;
+	u32 offset = 0;
+	if (address < RDRAM_SIZE)
+	{
+		offset = address;
+	}
+	else
+	{
+		const u32 segment = address & 0xE0000000u;
+		if (segment != 0x80000000u && segment != 0xA0000000u)
+		{
+			mHasUncoveredAddr = true;
+			return;
+		}
+		const u32 phys = address & 0x1FFFFFFFu;
+		if (phys >= RDRAM_SIZE)
+		{
+			mHasUncoveredAddr = true;
+			return;
+		}
+		offset = phys;
+	}
+
+	u64 end64 = static_cast<u64>(offset) + static_cast<u64>(length);
+	if (end64 > RDRAM_SIZE)
+		end64 = RDRAM_SIZE;
+	if (end64 <= offset)
+		return;
+	const u32 end = static_cast<u32>(end64);
+
+	for (size_t i = 0; i < mCoveredRanges.size(); ++i)
+	{
+		if (offset <= mCoveredRanges[i].End && end >= mCoveredRanges[i].Start)
+		{
+			if (offset < mCoveredRanges[i].Start) mCoveredRanges[i].Start = offset;
+			if (end > mCoveredRanges[i].End)      mCoveredRanges[i].End   = end;
+			return;
+		}
+	}
+	SFragmentCoveredRange r = { offset, end };
+	mCoveredRanges.push_back( r );
+}
+
+bool CFragment::OverlapsRange( u32 phys_start, u32 phys_end ) const
+{
+	if (mHasUncoveredAddr)
+		return true;
+	for (size_t i = 0; i < mCoveredRanges.size(); ++i)
+	{
+		if (mCoveredRanges[i].Start < phys_end && mCoveredRanges[i].End > phys_start)
+			return true;
+	}
+	return false;
+}
+
+void CFragment::RemoveEvictedIncomingLinks()
+{
+	size_t write = 0;
+	for (size_t i = 0; i < mIncomingLinks.size(); ++i)
+	{
+		if (!mIncomingLinks[i].Owner->IsEvicted())
+		{
+			if (write != i)
+				mIncomingLinks[write] = mIncomingLinks[i];
+			++write;
+		}
+	}
+	mIncomingLinks.resize(write);
 }
 
 //*************************************************************************************
@@ -186,7 +276,13 @@ void CFragment::Execute()
 #else
 	const void *		p( g_pu8RamBase_8000 );
 	u32					upper( 0x80000000 + gRamSize );
+#ifdef DAEDALUS_CTR_XRAY
+	const u64 jit_t0 = svcGetSystemTick();
+#endif
 	_EnterDynaRec( mEntryPoint.GetTarget(), &gCPUState, p, upper );
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::AddJit(svcGetSystemTick() - jit_t0);
+#endif
 #endif // FRAGMENT_SIMULATE_EXECUTION
 
 #ifdef DAEDALUS_DEBUG_DYNAREC
@@ -808,8 +904,52 @@ void CFragment::Assemble( CCodeBufferManager * p_manager,
 			}
 			else
 			{
-				exit_address = branch_instruction_address + 4;
-				jump_location = p_generator->GenerateExitCode( exit_address, details.TargetAddress, num_instructions_executed, no_next_fragment );
+				bool inlined_delay = false;
+				const u32 delay_addr = branch_instruction_address + 4;
+				const u32 delay_phys = delay_addr & 0x1FFFFFFFu;
+				if ( ((delay_addr - 0x80000000u) < 0x40000000u) && (delay_phys + sizeof(OpCode) <= gRamSize) && g_pu8RamBase != nullptr )
+				{
+					OpCode delay_op = *reinterpret_cast<const OpCode *>(g_pu8RamBase + delay_phys);
+					const u32 op = delay_op.op;
+					const bool is_safe_delay =
+						op != OP_REGIMM && op != OP_J && op != OP_JAL &&
+						op != OP_BEQ && op != OP_BNE && op != OP_BLEZ && op != OP_BGTZ &&
+						op != OP_BEQL && op != OP_BNEL && op != OP_BLEZL && op != OP_BGTZL &&
+						op != OP_COPRO0 && op != OP_PATCH &&
+						!(op == OP_COPRO1 && delay_op.cop1_op == Cop1Op_BCInstr) &&
+						!(op == OP_SPECOP && (delay_op.spec_op == SpecOp_JR || delay_op.spec_op == SpecOp_JALR ||
+						                      delay_op.spec_op == SpecOp_SYSCALL || delay_op.spec_op == SpecOp_BREAK));
+					if (is_safe_delay)
+					{
+						STraceEntry delay_ti {};
+						delay_ti.Address = delay_addr;
+						delay_ti.OpCode = delay_op;
+						delay_ti.BranchIdx = INVALID_IDX;
+						delay_ti.BranchDelaySlot = true;
+						delay_ti.Usage.Access8000 = false;
+
+#ifdef DAEDALUS_PSP
+						p_generator->GenerateOpCode( delay_ti, true, nullptr, nullptr );
+#else
+						CJumpLocation exception_handler_jump( p_generator->GenerateOpCode( delay_ti, true, nullptr, nullptr ) );
+						if (exception_handler_jump.IsSet())
+						{
+							exception_handler_jumps.push_back(exception_handler_jump);
+							exception_handler_snapshots.push_back(p_generator->GetRegisterSnapshot());
+						}
+#endif
+						num_instructions_executed++;
+						AddCoveredRange( delay_addr, sizeof(OpCode) );
+						exit_address = details.TargetAddress;
+						jump_location = p_generator->GenerateExitCode( exit_address, NO_JUMP_ADDRESS, num_instructions_executed, no_next_fragment );
+						inlined_delay = true;
+					}
+				}
+				if (!inlined_delay)
+				{
+					exit_address = branch_instruction_address + 4;
+					jump_location = p_generator->GenerateExitCode( exit_address, details.TargetAddress, num_instructions_executed, no_next_fragment );
+				}
 			}
 
 			AddPatch( exit_address, jump_location );

@@ -58,7 +58,7 @@ public:
 
 			if( is_dirty )
 			{
-				DAEDALUS_ASSERT( IsKnownValue( reg, lo_hi_idx ) || IsCached( reg, lo_hi_idx ), "Checking dirty flag on unknown/uncached register?" );
+				DAEDALUS_ASSERT( IsKnownValue( reg, lo_hi_idx ) || IsCached( reg, lo_hi_idx ) || (lo_hi_idx == 1 && IsHiSignExtended( reg )), "Checking dirty flag on unknown/uncached register?" );
 			}
 
 			return is_dirty;
@@ -88,7 +88,7 @@ public:
 #ifdef DAEDALUS_ENABLE_ASSERTS
 			if( dirty )
 			{
-				 DAEDALUS_ASSERT( IsKnownValue( reg, lo_hi_idx ) || IsCached( reg, lo_hi_idx ), "Setting dirty flag on unknown/uncached register?" );
+				 DAEDALUS_ASSERT( IsKnownValue( reg, lo_hi_idx ) || IsCached( reg, lo_hi_idx ) || (lo_hi_idx == 1 && IsHiSignExtended( reg )), "Setting dirty flag on unknown/uncached register?" );
 			}
 #endif
 			mRegisterCacheInfo[ reg ][ lo_hi_idx ].Dirty = dirty;
@@ -114,6 +114,16 @@ public:
 		inline REG32	GetKnownValue( EN64Reg reg, u32 lo_hi_idx ) const
 		{
 			return mRegisterCacheInfo[ reg ][ lo_hi_idx ].KnownValue;
+		}
+
+		inline bool	IsHiSignExtended( EN64Reg reg ) const
+		{
+			return mRegisterCacheInfo[ reg ][ 1 ].SignExtended;
+		}
+
+		inline void	SetHiSignExtended( EN64Reg reg, bool sign_extended )
+		{
+			mRegisterCacheInfo[ reg ][ 1 ].SignExtended = sign_extended;
 		}
 
 		inline bool	IsFPValid( EN64FloatReg reg ) const
@@ -157,7 +167,7 @@ private:
 			bool			Valid;				// Is the contents of the register valid?
 			bool			Dirty;				// Is the contents of the register modified?
 			bool			Known;				// Is the contents of the known?
-			//bool			SignExtended;		// Is this (high) register just sign extension of low reg?
+			bool			SignExtended;		// Is this (high) register just sign extension of low reg?
 		};
 
 		// ARM fp registers are stored in a 1:1 mapping with the n64 counterparts

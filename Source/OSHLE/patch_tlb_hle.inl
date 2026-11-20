@@ -45,7 +45,8 @@ TEST_DISABLE_TLB_FUNCS
 	u32 addr = gGPR[REG_a0]._u32_0;
 	//DBGConsole_Msg(0, "osVirtualToPhysical(0x%08x)", addr);
 
-	gGPR[REG_v0]._s64 = (s64)ConvertToPhysics( addr );
+	u32 phys = ((addr - 0x80000000u) < 0x40000000u) ? (addr & 0x1FFFFFFFu) : ConvertToPhysics( addr );
+	gGPR[REG_v0]._s64 = (s64)(s32)phys;
 
 	return PATCH_RET_JR_RA;
 }
@@ -60,7 +61,8 @@ TEST_DISABLE_TLB_FUNCS
 	u32 addr = gGPR[REG_a0]._u32_0;
 	//DBGConsole_Msg(0, "osVirtualToPhysical(0x%08x)", (u32)gGPR[REG_a0]);
 
-	gGPR[REG_v0]._s64 = (s64)ConvertToPhysics( addr );
+	u32 phys = ((addr - 0x80000000u) < 0x40000000u) ? (addr & 0x1FFFFFFFu) : ConvertToPhysics( addr );
+	gGPR[REG_v0]._s64 = (s64)(s32)phys;
 
 	return PATCH_RET_JR_RA;
 }

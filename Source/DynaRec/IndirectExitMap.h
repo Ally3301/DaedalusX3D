@@ -36,11 +36,16 @@ class CIndirectExitMap
 		void					SetCache( const CFragmentCache * p_cache )
 		{
 			mpCache = p_cache;
+			ClearMru();
+		}
+		void					ClearMru()
+		{
 			mMruAddr0 = 0; mMruTarget0 = nullptr;
 			mMruAddr1 = 0; mMruTarget1 = nullptr;
 		}
 
 	private:
+		friend void VerifyIndirectExitMapLayout();
 		const CFragmentCache *	mpCache;
 		u32						mMruAddr0;
 		const void *			mMruTarget0;

@@ -154,9 +154,32 @@ void	CAssemblyWriterARM::TST(EArmReg rn, EArmReg rm)
 	EmitDWORD(0xe1100000 | rn << 16 | rm);
 }
 
+void	CAssemblyWriterARM::TST_IMM(EArmReg rn, u8 imm, u8 ror4)
+{
+	EmitDWORD(0xe3100000 | (rn << 16) | ((ror4 & 0xf) << 8) | imm);
+}
+
 void	CAssemblyWriterARM::CMP_IMM(EArmReg rn, u8 imm)
 {
 	EmitDWORD(0xe3500000 | rn << 16 | imm);
+}
+
+void	CAssemblyWriterARM::CMP_IMM_U32(EArmReg rn, u32 imm, EArmReg temp)
+{
+	u32 enc;
+	if (encOp2Imm(imm, &enc))
+	{
+		EmitDWORD(0xe3500000 | (rn << 16) | enc); // CMP rn, #enc
+	}
+	else if (encOp2Imm(-imm, &enc))
+	{
+		EmitDWORD(0xe3700000 | (rn << 16) | enc); // CMN rn, #(-imm)
+	}
+	else
+	{
+		MOV32(temp, imm);
+		CMP(rn, temp);
+	}
 }
 
 void	CAssemblyWriterARM::CMP(EArmReg rn, EArmReg rm)
@@ -355,6 +378,11 @@ void	CAssemblyWriterARM::ORR_IMM(EArmReg rd, EArmReg rn, u32 imm, EArmReg temp)
 		MOV32(temp, imm);
 		ORR(rd, rn, temp);
 	}
+}
+
+void	CAssemblyWriterARM::ORR_IMM_COND(EArmReg rd, EArmReg rn, u8 imm, u8 ror4, EArmCond cond)
+{
+	EmitDWORD((cond << 28) | 0x03800000 | (rn << 16) | (rd << 12) | ((ror4 & 0xf) << 8) | imm);
 }
 
 void	CAssemblyWriterARM::XOR(EArmReg rd, EArmReg rn, EArmReg rm)
@@ -759,7 +787,19 @@ void	CAssemblyWriterARM::MOVT(EArmReg reg, u16 imm)
 
 void	CAssemblyWriterARM::MOV32(EArmReg reg, u32 imm)
 {
-	if(!(imm >> 16))
+	u32 enc;
+	if (encOp2Imm(imm, &enc))
+	{
+		// Single 1-cycle MOV rd, #imm8 ROR #rot (covers 0..255, LUI constants like
+		// 0x80000000/0x3F800000, aligned masks, etc. with zero literal pool load).
+		EmitDWORD(0xe3a00000 | (reg << 12) | enc);
+	}
+	else if (encOp2Imm(~imm, &enc))
+	{
+		// Single 1-cycle MVN rd, #(~imm) (covers -1..-256, ~FPCSR_C, etc.).
+		EmitDWORD(0xe3e00000 | (reg << 12) | enc);
+	}
+	else if(!(imm >> 16))
 	{
 		#ifdef DYNAREC_ARMV7
 		MOVW(reg, imm);
@@ -799,8 +839,8 @@ void CAssemblyWriterARM::CALL( CCodeLabel target )
 {
 	PUSH(0x5000); //R12, LR
 
-	MOV32(ArmReg_R4, target.GetTargetU32());
-	BLX(ArmReg_R4);
+	MOV32(ArmReg_R3, target.GetTargetU32());
+	BLX(ArmReg_R3);
 
 	POP(0x5000); //R12, LR
 }

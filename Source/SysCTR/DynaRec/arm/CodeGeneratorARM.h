@@ -225,6 +225,8 @@ class CCodeGeneratorARM : public CCodeGenerator, public CAssemblyWriterARM
 				void 	GenerateBLEZ( EN64Reg rs, const SBranchDetails * p_branch, CJumpLocation * p_branch_jump );
 				void 	GenerateBGEZ( EN64Reg rs, const SBranchDetails * p_branch, CJumpLocation * p_branch_jump );
 				void 	GenerateBLTZ( EN64Reg rs, const SBranchDetails * p_branch, CJumpLocation * p_branch_jump );
+				void 	GenerateBGEZAL( EN64Reg rs, u32 address, const SBranchDetails * p_branch, CJumpLocation * p_branch_jump );
+				void 	GenerateBLTZAL( EN64Reg rs, u32 address, const SBranchDetails * p_branch, CJumpLocation * p_branch_jump );
 				void 	GenerateBGTZ( EN64Reg rs, const SBranchDetails * p_branch, CJumpLocation * p_branch_jump );
 				void	GenerateBC1( bool branch_on_true, const SBranchDetails * p_branch, CJumpLocation * p_branch_jump );
 

@@ -38,6 +38,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "OSHLE/OSTask.h"
 #include "OSHLE/patch.h"
+#ifdef DAEDALUS_CTR_XRAY
+#include "SysCTR/Utility/PerfProfilerCTR.h"
+#endif
 
 bool gDMAUsed = false;
 //*****************************************************************************
@@ -45,6 +48,9 @@ bool gDMAUsed = false;
 //*****************************************************************************
 void DMA_SP_CopyFromRDRAM()
 {
+#ifdef DAEDALUS_CTR_XRAY
+	const u64 dma_t0 = svcGetSystemTick();
+#endif
 	u32 spmem_address_reg = Memory_SP_GetRegister(SP_MEM_ADDR_REG);
 	u32 rdram_address_reg = Memory_SP_GetRegister(SP_DRAM_ADDR_REG);
 	u32 rdlen_reg         = Memory_SP_GetRegister(SP_RD_LEN_REG);
@@ -69,17 +75,30 @@ void DMA_SP_CopyFromRDRAM()
 	
 	src = g_pu8RamBase + (rdram_address & ~7);
 	
-	for (u32 j = 0; j < count; j++ )
+	if (count == 1 || (skip & 3) == 0)
 	{
-		for (u32 i = 0 ; i < length; i++)
+		for (u32 j = 0; j < count; j++)
 		{
-			*(uint8_t *)(((size_t)dest + j * length + i) ^ U8_TWIDDLE) = *(uint8_t *)(((size_t)src + j * skip + i) ^ U8_TWIDDLE);
+			memcpy(dest + j * length, src + j * skip, length);
+		}
+	}
+	else
+	{
+		for (u32 j = 0; j < count; j++ )
+		{
+			for (u32 i = 0 ; i < length; i++)
+			{
+				*(uint8_t *)(((size_t)dest + j * length + i) ^ U8_TWIDDLE) = *(uint8_t *)(((size_t)src + j * skip + i) ^ U8_TWIDDLE);
+			}
 		}
 	}
 
 	//Clear the DMA Busy
 	Memory_SP_SetRegister(SP_DMA_BUSY_REG, 0);
 	Memory_SP_ClrRegisterBits(SP_STATUS_REG, SP_STATUS_DMA_BUSY);
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::AddDma(svcGetSystemTick() - dma_t0);
+#endif
 }
 
 //*****************************************************************************
@@ -110,11 +129,21 @@ void DMA_SP_CopyToRDRAM()
 	dest = g_pu8RamBase + (rdram_address & ~7);
 	src = g_pu8SpDmemBase + ((spmem_address_reg & 0x1FFF) & ~7);
 	
-	for (u32 j = 0 ; j < count; j++)
+	if (count == 1 || (skip & 3) == 0)
 	{
-		for (u32 i = 0 ; i < length; i++)
+		for (u32 j = 0; j < count; j++)
 		{
-			*(uint8_t *)(((size_t)dest + j * skip + i) ^ U8_TWIDDLE) = *(uint8_t *)(((size_t)src + j * length + i) ^ U8_TWIDDLE);
+			memcpy(dest + j * skip, src + j * length, length);
+		}
+	}
+	else
+	{
+		for (u32 j = 0 ; j < count; j++)
+		{
+			for (u32 i = 0 ; i < length; i++)
+			{
+				*(uint8_t *)(((size_t)dest + j * skip + i) ^ U8_TWIDDLE) = *(uint8_t *)(((size_t)src + j * length + i) ^ U8_TWIDDLE);
+			}
 		}
 	}
 
@@ -237,6 +266,9 @@ static void OnCopiedRom()
 
 void DMA_PI_CopyToRDRAM()
 {
+#ifdef DAEDALUS_CTR_XRAY
+	const u64 dma_t0 = svcGetSystemTick();
+#endif
 	u32 mem_address  {Memory_PI_GetRegister(PI_DRAM_ADDR_REG) & 0x00FFFFFF};
 	u32 cart_address {Memory_PI_GetRegister(PI_CART_ADDR_REG)  & 0xFFFFFFFF};
 	u32 pi_length_reg {(Memory_PI_GetRegister(PI_WR_LEN_REG) & 0xFFFFFFFF) + 1};
@@ -294,6 +326,9 @@ void DMA_PI_CopyToRDRAM()
 	Memory_PI_ClrRegisterBits(PI_STATUS_REG, PI_STATUS_DMA_BUSY);
 	Memory_MI_SetRegisterBits(MI_INTR_REG, MI_INTR_PI);
 	R4300_Interrupt_UpdateCause3();
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::AddDma(svcGetSystemTick() - dma_t0);
+#endif
 }
 
 //*****************************************************************************
@@ -301,6 +336,9 @@ void DMA_PI_CopyToRDRAM()
 //*****************************************************************************
 void DMA_PI_CopyFromRDRAM()
 {
+#ifdef DAEDALUS_CTR_XRAY
+	const u64 dma_t0 = svcGetSystemTick();
+#endif
 	u32 mem_address  {Memory_PI_GetRegister(PI_DRAM_ADDR_REG) & 0xFFFFFFFF};
 	u32 cart_address {Memory_PI_GetRegister(PI_CART_ADDR_REG)  & 0xFFFFFFFF};
 	u32 pi_length_reg {(Memory_PI_GetRegister(PI_RD_LEN_REG)  & 0xFFFFFFFF) + 1};
@@ -347,4 +385,7 @@ void DMA_PI_CopyFromRDRAM()
 	Memory_PI_ClrRegisterBits(PI_STATUS_REG, PI_STATUS_DMA_BUSY);
 	Memory_MI_SetRegisterBits(MI_INTR_REG, MI_INTR_PI);
 	R4300_Interrupt_UpdateCause3();
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::AddDma(svcGetSystemTick() - dma_t0);
+#endif
 }

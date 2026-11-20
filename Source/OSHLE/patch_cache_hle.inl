@@ -9,10 +9,10 @@ TEST_DISABLE_CACHE_FUNCS
 	u32 p = gGPR[REG_a0]._u32_0;
 	u32 len = gGPR[REG_a1]._u32_0;
 
-	if (len < 0x4000)
-		CPU_InvalidateICacheRange(p, len);
-	else
+	if (p == 0 || (p == 0x80000000u && len >= 0x4000u))
 		CPU_InvalidateICache();
+	else
+		CPU_InvalidateICacheRange(p, len);
 #endif
 
 	return PATCH_RET_JR_RA;

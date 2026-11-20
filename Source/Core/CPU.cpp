@@ -25,6 +25,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <algorithm>
 #ifdef DAEDALUS_CTR
 #include <cstdio>
+#ifdef DAEDALUS_CTR_XRAY
+#include "SysCTR/Utility/PerfProfilerCTR.h"
+#endif
 #endif
 #include <string>
 #include <vector>
@@ -667,6 +670,9 @@ extern "C"
 {
 void CPU_HANDLE_COUNT_INTERRUPT()
 {
+#ifdef DAEDALUS_CTR_XRAY
+	const u64 irq_t0 = svcGetSystemTick();
+#endif
 	#ifdef DAEDALUS_ENABLE_ASSERTS
 		DAEDALUS_ASSERT( gCPUState.NumEvents > 0, "Should always have at least one event queued up" );
 	#endif
@@ -750,6 +756,9 @@ void CPU_HANDLE_COUNT_INTERRUPT()
 	#ifdef DAEDALUS_ENABLE_ASSERTS
 	DAEDALUS_ASSERT( gCPUState.NumEvents > 0, "Should always have at least one event queued up" );
 	#endif
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::AddIrq(svcGetSystemTick() - irq_t0);
+#endif
 }
 }
 

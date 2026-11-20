@@ -45,6 +45,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 //*************************************************************************************
 //
 //*************************************************************************************
+class CFragment;
 class CFragmentCache;
 class CCodeGenerator;
 class CCodeBufferManager;
@@ -56,6 +57,19 @@ struct SFragmentPatchDetails
 	CJumpLocation	Jump;
 };
 typedef std::vector<SFragmentPatchDetails>	FragmentPatchList;
+
+struct SFragmentJumpLink
+{
+	CJumpLocation	Jump;
+	CCodeLabel		Fallback;
+	CFragment *		Owner;
+};
+
+struct SFragmentCoveredRange
+{
+	u32				Start;
+	u32				End;
+};
 
 //*************************************************************************************
 //
@@ -91,6 +105,17 @@ public:
 		const FragmentPatchList &	GetPatchList() const		{ return mPatchList; }
 		void		DiscardPatchList()							{ mPatchList.clear(); }
 
+		void		AddCoveredRange( u32 address, u32 length );
+		bool		OverlapsRange( u32 phys_start, u32 phys_end ) const;
+		const std::vector<SFragmentCoveredRange> & GetCoveredRanges() const { return mCoveredRanges; }
+		bool		IsOshleFragment() const						{ return mIsOshle; }
+		void		SetEvicted( bool evicted )					{ mEvicted = evicted; }
+		bool		IsEvicted() const							{ return mEvicted; }
+		void		AddIncomingLink( const SFragmentJumpLink & link ) { mIncomingLinks.push_back( link ); }
+		const std::vector<SFragmentJumpLink> & GetIncomingLinks() const { return mIncomingLinks; }
+		void		RemoveEvictedIncomingLinks();
+		CIndirectExitMap * GetIndirectExitMap() const			{ return mpIndirectExitMap; }
+
 #ifdef FRAGMENT_RETAIN_ADDITIONAL_INFO
 		u32			GetHitCount() const							{ return mHitCount; }
 		u32			GetCyclesExecuted() const					{ return mHitCount * mOutputLength / 4; }
@@ -119,6 +144,12 @@ private:
 		u32								mFragmentFunctionLength;
 
 		CIndirectExitMap *				mpIndirectExitMap;
+
+		std::vector< SFragmentCoveredRange >	mCoveredRanges;
+		std::vector< SFragmentJumpLink >		mIncomingLinks;
+		bool									mIsOshle;
+		bool									mHasUncoveredAddr;
+		bool									mEvicted;
 
 #ifdef FRAGMENT_RETAIN_ADDITIONAL_INFO
 		u32								mHitCount;

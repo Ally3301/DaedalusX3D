@@ -24,6 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 class	CFragment;
 struct STraceEntry;
+struct SFragmentJumpLink;
 class	CJumpLocation;
 class	CCodeBufferManager;
 
@@ -36,6 +37,22 @@ struct FHashT
 	u32 ptr;
 };
 
+struct SIndirectJumpEntry
+{
+	u32          addr;
+	const void * target;
+};
+
+static const u32 INDIRECT_JUMP_TABLE_BITS = 12;
+static const u32 INDIRECT_JUMP_TABLE_SIZE = 1u << INDIRECT_JUMP_TABLE_BITS;
+
+inline u32 IndirectJumpTableIndex( u32 addr )
+{
+	return ((addr >> 2) ^ (addr >> 14)) & (INDIRECT_JUMP_TABLE_SIZE - 1);
+}
+
+extern "C" SIndirectJumpEntry gIndirectJumpTable[INDIRECT_JUMP_TABLE_SIZE];
+
 #include "FragmentCacheCoverage.h"
 
 class CFragmentCache
@@ -47,6 +64,7 @@ public:
 	// On failure `error` receives the reason: 0, a negative errno-like value, or
 	// the platform Result. It may be null.
 	bool					InitialiseCodeBuffer( int * error = nullptr );
+	void					FinaliseCodeBuffer();
 
 #ifdef DAEDALUS_DEBUG_DYNAREC
 	CFragment *				LookupFragment( u32 address ) const;
@@ -59,6 +77,7 @@ public:
 
 	u32						GetCacheSize() const					{ return mFragments.size(); }
 	void					Clear();
+	bool					InvalidateRange( u32 address, u32 length, u32 * out_evicted = nullptr );
 
 #ifdef DAEDALUS_DEBUG_DYNAREC
 	void					DumpStats( const char * outputdir ) const;
@@ -95,7 +114,7 @@ private:
 	u32						mInputLength;
 	u32						mOutputLength;
 
-	typedef std::vector< CJumpLocation >	JumpList;
+	typedef std::vector< SFragmentJumpLink >	JumpList;
 	typedef std::map< u32, JumpList >		JumpMap;
 	JumpMap					mJumpMap;
 

@@ -44,6 +44,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "Utility/Macros.h"
 #include "Utility/Profiler.h"
 #include "Utility/Synchroniser.h"
+#ifdef DAEDALUS_CTR_XRAY
+#include "SysCTR/Utility/PerfProfilerCTR.h"
+#endif
 
 #ifdef DAEDALUS_ENABLE_DYNAREC
 
@@ -165,6 +168,15 @@ CFragmentCache						gFragmentCache {};
 static bool							gResetFragmentCache {false};
 static bool gResetFragmentCacheForCapacity {false};
 
+struct SPendingInvalRange
+{
+	u32 addr;
+	u32 len;
+};
+static const u32					kMaxPendingInvals = 8;
+static SPendingInvalRange			gPendingInvals[kMaxPendingInvals];
+static u32							gPendingInvalCount = 0;
+
 #ifdef DAEDALUS_DEBUG_DYNAREC
 std::map< u32, u32 >				gAbortedTraceReasons;
 
@@ -188,6 +200,22 @@ u32 gFragmentLookupSuccess {};
 //*****************************************************************************
 void R4300_CALL_TYPE CPU_InvalidateICache()
 {
+#ifdef DAEDALUS_CTR_XRAY
+	static u32 sAllLogs = 0;
+	if (sAllLogs < 24)
+	{
+		++sAllLogs;
+		if (FILE * f = fopen("sdmc:/DaedalusX64.log", "a"))
+		{
+			fprintf(f, "  inval[ALL]: pc=0x%08lx a0=0x%08lx a1=0x%08lx frags=%lu\n",
+				(unsigned long)gCPUState.CurrentPC,
+				(unsigned long)gGPR[REG_a0]._u32_0,
+				(unsigned long)gGPR[REG_a1]._u32_0,
+				(unsigned long)gFragmentCache.GetCacheSize());
+			fclose(f);
+		}
+	}
+#endif
 	CPU_ResetFragmentCache();
 }
 
@@ -209,6 +237,34 @@ void R4300_CALL_TYPE CPU_InvalidateICacheRange( u32 address, u32 length )
 	{
 #ifndef DAEDALUS_SILENT
 		printf( "Write to %08lx (%lu bytes) overlaps fragment cache entries\n", address, length );
+#endif
+#ifdef DAEDALUS_CTR
+		if (!gResetFragmentCache)
+		{
+			// Coalesce identical or adjacent pending invalidation ranges
+			for (u32 i = 0; i < gPendingInvalCount; ++i)
+			{
+				const u32 s1 = gPendingInvals[i].addr;
+				const u32 e1 = s1 + gPendingInvals[i].len;
+				const u32 s2 = address;
+				const u32 e2 = address + length;
+				if (s2 <= e1 && e2 >= s1)
+				{
+					const u32 ns = (s1 < s2) ? s1 : s2;
+					const u32 ne = (e1 > e2) ? e1 : e2;
+					gPendingInvals[i].addr = ns;
+					gPendingInvals[i].len  = ne - ns;
+					return;
+				}
+			}
+			if (gPendingInvalCount < kMaxPendingInvals)
+			{
+				gPendingInvals[gPendingInvalCount].addr = address;
+				gPendingInvals[gPendingInvalCount].len  = length;
+				++gPendingInvalCount;
+				return;
+			}
+		}
 #endif
 		CPU_ResetFragmentCache();
 	}
@@ -469,7 +525,13 @@ void CPU_CreateAndAddFragment()
 		return;
 	}
 #endif
+#ifdef DAEDALUS_CTR_XRAY
+	const u64 comp_t0 = svcGetSystemTick();
+#endif
 	CFragment * p_fragment( gTraceRecorder.CreateFragment( gFragmentCache.GetCodeBufferManager(), &gFragmentCache ) );
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::AddComp(svcGetSystemTick() - comp_t0);
+#endif
 
 	if( p_fragment != nullptr )
 	{
@@ -535,6 +597,65 @@ void CPU_HandleDynaRecOnBranch( bool backwards, bool trace_already_enabled )
 
 	while( gCPUState.GetStuffToDo() == 0 && gCPUState.Delay == NO_DELAY )
 	{
+		if (!gResetFragmentCache && gPendingInvalCount > 0)
+		{
+#ifdef DAEDALUS_ENABLE_OS_HOOKS
+			if (gNumOfOSFunctions == 0)
+			{
+				// During early ROM boot (before libultra OS functions are discovered),
+				// fall back to full Clear() + Patch_PatchAll() so OSHLE hooks install immediately.
+				gPendingInvalCount = 0;
+				gResetFragmentCache = true;
+			}
+			else
+#endif
+			{
+				// Safe branch boundary (outside _EnterDynaRec): selectively evict only
+				// fragments overlapping the modified RDRAM ranges instead of flushing the
+				// entire 6 MiB cache!
+				if (gTraceRecorder.IsTraceActive())
+				{
+					gTraceRecorder.AbortTrace();
+					change_core = true;
+				}
+				bool all_selective_ok = true;
+				for (u32 i = 0; i < gPendingInvalCount; ++i)
+				{
+					u32 evicted = 0;
+					if (!gFragmentCache.InvalidateRange(gPendingInvals[i].addr, gPendingInvals[i].len, &evicted))
+					{
+						all_selective_ok = false;
+						break;
+					}
+#ifdef DAEDALUS_CTR_XRAY
+					static u32 sSelLogs = 0;
+					if (evicted > 0 && sSelLogs < 24)
+					{
+						++sSelLogs;
+						if (FILE * f = fopen("sdmc:/DaedalusX64.log", "a"))
+						{
+							fprintf(f, "  inval[SEL]: addr=0x%08lx len=0x%lx evicted=%lu kept=%lu\n",
+								(unsigned long)gPendingInvals[i].addr,
+								(unsigned long)gPendingInvals[i].len,
+								(unsigned long)evicted,
+								(unsigned long)gFragmentCache.GetCacheSize());
+							fclose(f);
+						}
+					}
+#endif
+				}
+				gPendingInvalCount = 0;
+				if (all_selective_ok)
+				{
+					gHotTraceCountMap.clear();
+				}
+				else
+				{
+					gResetFragmentCache = true;
+				}
+			}
+		}
+
 		#ifdef DAEDALUS_ENABLE_DYNAREC_PROFILE
 		DAEDALUS_ASSERT( gCPUState.Delay == NO_DELAY, "Why are we entering with a delay slot active?" );
 		u32			entry_count( gCPUState.CPUControl[C0_COUNT]._u32 ); // Just used DYNAREC_PROFILE_ENTEREXIT
@@ -562,6 +683,14 @@ void CPU_HandleDynaRecOnBranch( bool backwards, bool trace_already_enabled )
 			}
 
 			p_fragment->Execute();
+#ifdef DAEDALUS_CTR_XRAY
+			if (gCPUState.GetStuffToDo() != 0)
+				PerfCTR::CountExitReason(0);
+			else if (gCPUState.Delay != NO_DELAY)
+				PerfCTR::CountExitReason(1);
+			else
+				PerfCTR::CountExitReason(2);
+#endif
 
 			DYNAREC_PROFILE_ENTEREXIT( entry_address, gCPUState.CurrentPC, gCPUState.CPUControl[C0_COUNT]._u32 - entry_count );
 
@@ -579,6 +708,9 @@ void CPU_HandleDynaRecOnBranch( bool backwards, bool trace_already_enabled )
 				if (gResetFragmentCacheForCapacity)
 				{
 					// At this branch boundary no cached fragment is executing.
+#ifdef DAEDALUS_CTR_XRAY
+					PerfCTR::CountResetReason(0);
+#endif
 					gFragmentCache.Clear();
 					gHotTraceCountMap.clear();
 #ifdef DAEDALUS_ENABLE_OS_HOOKS
@@ -586,6 +718,7 @@ void CPU_HandleDynaRecOnBranch( bool backwards, bool trace_already_enabled )
 #endif
 					gResetFragmentCacheForCapacity = false;
 					gResetFragmentCache = false;
+					gPendingInvalCount = 0;
 				}
 
 				if( !gTraceRecorder.IsTraceActive() )
@@ -599,6 +732,9 @@ void CPU_HandleDynaRecOnBranch( bool backwards, bool trace_already_enabled )
 						if(true)
 #endif
 						{
+#ifdef DAEDALUS_CTR_XRAY
+							PerfCTR::CountResetReason(1);
+#endif
 							gFragmentCache.Clear();
 							gHotTraceCountMap.clear();		// Makes sense to clear this now, to get accurate usage stats
 #ifdef DAEDALUS_ENABLE_OS_HOOKS
@@ -616,6 +752,9 @@ void CPU_HandleDynaRecOnBranch( bool backwards, bool trace_already_enabled )
 
 					if( gFragmentCache.GetCacheSize() > gMaxFragmentCacheSize)
 					{
+#ifdef DAEDALUS_CTR_XRAY
+						PerfCTR::CountResetReason(2);
+#endif
 						gFragmentCache.Clear();
 						gHotTraceCountMap.clear();		// Makes sense to clear this now, to get accurate usage stats
 #ifdef DAEDALUS_ENABLE_OS_HOOKS
@@ -630,11 +769,12 @@ void CPU_HandleDynaRecOnBranch( bool backwards, bool trace_already_enabled )
 						#ifdef DAEDALUS_DEBUG_CONSOLE
 						DBGConsole_Msg( 0, "Hot trace cache hit %d, dumping", gHotTraceCountMap.size() );
 						#endif
-						gHotTraceCountMap.clear();
-						gFragmentCache.Clear();
-#ifdef DAEDALUS_ENABLE_OS_HOOKS
-						Patch_PatchAll();
+#ifdef DAEDALUS_CTR_XRAY
+						PerfCTR::CountResetReason(3);
 #endif
+						// Only clear the cold-target counter table; never nuke compiled fragments
+						// just because 3072 cold addresses were visited (fixes SSB fight cache thrash!).
+						gHotTraceCountMap.clear();
 					}
 					else if( trace_count == gHotTraceThreshold )
 					{
@@ -687,6 +827,7 @@ void Dynamo_Reset()
 	gFragmentCache.Clear();
 	gResetFragmentCache = false;
 	gResetFragmentCacheForCapacity = false;
+	gPendingInvalCount = 0;
 	gTraceRecorder.AbortTrace();
 #ifdef DAEDALUS_DEBUG_DYNAREC
 	gAbortedTraceReasons.clear();

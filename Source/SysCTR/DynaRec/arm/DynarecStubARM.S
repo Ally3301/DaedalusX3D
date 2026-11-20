@@ -8,6 +8,8 @@
 #define _TargetPC	(_AuxBase + 0x04)
 #define _Delay		(_AuxBase + 0x08)
 #define _StuffToDo	(_AuxBase + 0x0c)
+#define _MultLo		(_AuxBase + 0x10)
+#define _MultHi		(_AuxBase + 0x18)
 #define _Temp1		(_AuxBase + 0x20)
 #define _Temp2		(_AuxBase + 0x24)
 #define _Temp3		(_AuxBase + 0x28)
@@ -18,10 +20,13 @@
 .extern CPU_HANDLE_COUNT_INTERRUPT
 .extern g_MemoryLookupTableRead
 .extern g_MemoryLookupTableWrite
+.extern gIndirectJumpTable
 .extern HandleException_extern
 .extern Write32BitsForDynaRec
 .extern Write16BitsForDynaRec
 .extern Write8BitsForDynaRec
+.extern __aeabi_idivmod
+.extern __aeabi_uidivmod
 	
 .align 4
 .global _EnterDynaRec
@@ -29,6 +34,8 @@
 .global _DirectExitCheckDelay
 .global _DirectExitCheckCheckCount
 .global _IndirectExitCheck
+.global _DynaRec_DIV
+.global _DynaRec_DIVU
 
 	.global _ReadBitsDirect_u8
 	.global _ReadBitsDirect_s8
@@ -125,6 +132,33 @@ _IndirectExitCheck:
 	bne		_IndirectExitToC
 
 _IndirectExitLookup:
+	// 1) Per-callsite MRU slot 0 (catches tight polymorphic / colliding callers in 3 cycles)
+	ldr		r1, [r4, #4]
+	cmp		r1, r5
+	bne		1f
+	ldr		r0, [r4, #8]
+	cmp		r0, #0
+	beq		1f
+	mov		r12, r6
+	bx		r0
+1:
+	// 2) Global 4096-entry direct-mapped native target table (Ari64 mini_ht):
+	//    Resolves JR $ra, jump tables, and OSHLE returns (sinf/cosf/bcopy/guMtx*) in ~8 cycles
+	//    with zero C++ call overhead across up to 4096 distinct return addresses.
+	lsr		r1, r5, #2
+	eor		r1, r1, r5, lsr #14
+	lsl		r1, r1, #20
+	lsr		r1, r1, #20
+	ldr		r3, =gIndirectJumpTable
+	add		r3, r3, r1, lsl #3
+	ldmia	r3, {r0, r1}			// r0 = entry.addr ([r3, #0]), r1 = entry.target ([r3, #4])
+	cmp		r0, r5
+	bne		2f
+	cmp		r1, #0
+	beq		2f
+	mov		r12, r6
+	bx		r1
+2:
 	mov		r0, r4					// p_map
 	mov		r1, r5					// exit_pc
 	bl		IndirectExitMap_Lookup
@@ -292,3 +326,52 @@ _EnterDynaRec:
     mov r10, r2
 	mov r9,  r3
     bx  r0
+
+#######################################################################################
+# Fast native ARMv6 DIV / DIVU helpers:
+#   r0 = dividend, r1 = divisor, r12 = &gCPUState
+#   Preserves r4-r11 and ALL VFP registers (s0-s31), avoiding full register cache flush!
+.type _DynaRec_DIV, %function
+_DynaRec_DIV:
+	cmp		r1, #0
+	bxeq	lr
+	// Guard INT32_MIN / -1 overflow (MIPS R4300i: LO = INT32_MIN, HI = 0)
+	cmn		r1, #1
+	bne		1f
+	cmp		r0, #0x80000000
+	bne		1f
+	mov		r2, r0, asr #31
+	str		r0, [r12, #_MultLo]
+	str		r2, [r12, #_MultLo + 4]
+	mov		r2, #0
+	str		r2, [r12, #_MultHi]
+	str		r2, [r12, #_MultHi + 4]
+	bx		lr
+1:
+	push	{r4, lr}
+	mov		r4, r12
+	bl		__aeabi_idivmod
+	mov		r2, r0, asr #31
+	mov		r3, r1, asr #31
+	str		r0, [r4, #_MultLo]
+	str		r2, [r4, #_MultLo + 4]
+	str		r1, [r4, #_MultHi]
+	str		r3, [r4, #_MultHi + 4]
+	mov		r12, r4
+	pop		{r4, pc}
+
+.type _DynaRec_DIVU, %function
+_DynaRec_DIVU:
+	cmp		r1, #0
+	bxeq	lr
+	push	{r4, lr}
+	mov		r4, r12
+	bl		__aeabi_uidivmod
+	mov		r2, r0, asr #31
+	mov		r3, r1, asr #31
+	str		r0, [r4, #_MultLo]
+	str		r2, [r4, #_MultLo + 4]
+	str		r1, [r4, #_MultHi]
+	str		r3, [r4, #_MultHi + 4]
+	mov		r12, r4
+	pop		{r4, pc}

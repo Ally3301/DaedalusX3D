@@ -52,7 +52,7 @@ bool	PatchJumpLongAndFlush( CJumpLocation jump, CCodeLabel target )
 	PatchJumpLong( jump, target );
 	
 	#ifdef DAEDALUS_CTR
-	_InvalidateAndFlushCaches();
+	_InvalidateAndFlushCacheRange( jump.GetWritableU8P(), 4 );
 	#endif
 
 	return true;

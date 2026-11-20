@@ -36,6 +36,7 @@ void	CN64RegisterCacheARM::Reset()
 			mRegisterCacheInfo[ i ][ lo_hi_idx ].Valid = false;
 			mRegisterCacheInfo[ i ][ lo_hi_idx ].Dirty = false;
 			mRegisterCacheInfo[ i ][ lo_hi_idx ].Known = false;
+			mRegisterCacheInfo[ i ][ lo_hi_idx ].SignExtended = false;
 		}
 	}
 
@@ -60,4 +61,5 @@ void	CN64RegisterCacheARM::ClearCachedReg( EN64Reg n64_reg, u32 lo_hi_idx )
 	mRegisterCacheInfo[ n64_reg ][ lo_hi_idx ].Valid = false;
 	mRegisterCacheInfo[ n64_reg ][ lo_hi_idx ].Dirty = false;
 	mRegisterCacheInfo[ n64_reg ][ lo_hi_idx ].Known = false;
+	mRegisterCacheInfo[ n64_reg ][ lo_hi_idx ].SignExtended = false;
 }

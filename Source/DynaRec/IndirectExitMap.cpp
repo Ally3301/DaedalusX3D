@@ -25,6 +25,20 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "Fragment.h"
 
 #include "Debug/DBGConsole.h"
+#include <cstddef>
+#ifdef DAEDALUS_CTR_XRAY
+#include "SysCTR/Utility/PerfProfilerCTR.h"
+#endif
+
+#ifdef DAEDALUS_CTR
+void VerifyIndirectExitMapLayout()
+{
+	static_assert(offsetof(CIndirectExitMap, mMruAddr0) == 4, "DynarecStubARM.S offset mismatch");
+	static_assert(offsetof(CIndirectExitMap, mMruTarget0) == 8, "DynarecStubARM.S offset mismatch");
+	static_assert(offsetof(CIndirectExitMap, mMruAddr1) == 12, "DynarecStubARM.S offset mismatch");
+	static_assert(offsetof(CIndirectExitMap, mMruTarget1) == 16, "DynarecStubARM.S offset mismatch");
+}
+#endif
 
 
 //
@@ -84,6 +98,9 @@ const void * CIndirectExitMap::LookupIndirectTarget( u32 exit_address )
 		{
 			mMruAddr1 = mMruAddr0; mMruTarget1 = mMruTarget0;
 			mMruAddr0 = exit_address; mMruTarget0 = target;
+			const u32 jump_ix = IndirectJumpTableIndex( exit_address );
+			gIndirectJumpTable[jump_ix].addr   = exit_address;
+			gIndirectJumpTable[jump_ix].target = target;
 		}
 		return target;
 	}
@@ -95,6 +112,9 @@ extern "C"
 
 const void *	R4300_CALL_TYPE IndirectExitMap_Lookup( CIndirectExitMap * p_map, u32 exit_address )
 {
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::CountIndMiss();
+#endif
 	return p_map->LookupIndirectTarget( exit_address );
 }
 

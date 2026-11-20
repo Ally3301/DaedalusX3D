@@ -25,6 +25,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <algorithm>
 
 #include "Fragment.h"
+#include "IndirectExitMap.h"
 #include "CodeBufferManager.h"
 #include "DynaRecProfile.h"
 
@@ -34,6 +35,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "Utility/IO.h"
 
 #include "AssemblyUtils.h"
+#ifdef DAEDALUS_CTR
+#include "SysCTR/Utility/PerfProfilerCTR.h"
+#endif
+
+SIndirectJumpEntry gIndirectJumpTable[INDIRECT_JUMP_TABLE_SIZE] = {};
 
 
 //Define to show hash table statistics cache hit/miss
@@ -95,12 +101,18 @@ bool CFragmentCache::InitialiseCodeBuffer( int * error )
 //*************************************************************************************
 CFragmentCache::~CFragmentCache()
 {
+	FinaliseCodeBuffer();
+}
+
+void CFragmentCache::FinaliseCodeBuffer()
+{
 	Clear();
 
 	if (mpCodeBufferManager != nullptr)
 	{
 		mpCodeBufferManager->Finalise();
 		delete mpCodeBufferManager;
+		mpCodeBufferManager = nullptr;
 	}
 }
 
@@ -214,7 +226,13 @@ void CFragmentCache::InsertFragment( CFragment * p_fragment, const std::vector<S
 {
 	u32		fragment_address( p_fragment->GetEntryAddress() );
 
-	if (trace != nullptr && !trace->empty())
+	const std::vector<SFragmentCoveredRange> & covered = p_fragment->GetCoveredRanges();
+	if (!covered.empty())
+	{
+		for (size_t i = 0; i < covered.size(); ++i)
+			mCacheCoverage.ExtendCoverage(covered[i].Start, covered[i].End - covered[i].Start);
+	}
+	else if (trace != nullptr && !trace->empty())
 	{
 		for (std::vector<STraceEntry>::const_iterator it = trace->begin(); it != trace->end(); ++it)
 			mCacheCoverage.ExtendCoverage(it->Address, sizeof(OpCode));
@@ -239,6 +257,11 @@ void CFragmentCache::InsertFragment( CFragment * p_fragment, const std::vector<S
 	mpCacheHashTable[ix].addr = fragment_address;
 	mpCacheHashTable[ix].ptr = reinterpret_cast< u32 >( p_fragment );
 
+	// Populate global direct-mapped native target table for fast ARM indirect dispatch
+	const u32 jump_ix = IndirectJumpTableIndex( fragment_address );
+	gIndirectJumpTable[jump_ix].addr   = fragment_address;
+	gIndirectJumpTable[jump_ix].target = p_fragment->GetEntryTarget().GetTarget();
+
 	// Process any jumps for this before inserting new ones
 	JumpMap::iterator	jump_it( mJumpMap.find( fragment_address ) );
 	if( jump_it != mJumpMap.end() )
@@ -247,7 +270,8 @@ void CFragmentCache::InsertFragment( CFragment * p_fragment, const std::vector<S
 		for( JumpList::const_iterator it = jumps.begin(); it != jumps.end(); ++it )
 		{
 			//DBGConsole_Msg( 0, "Inserting [R%08x], patching jump at %08x ", address, (*it) );
-			PatchJumpLongAndFlush( (*it), p_fragment->GetEntryTarget() );
+			PatchJumpLongAndFlush( it->Jump, p_fragment->GetEntryTarget() );
+			p_fragment->AddIncomingLink( *it );
 		}
 
 		// All patched - clear
@@ -265,14 +289,27 @@ void CFragmentCache::InsertFragment( CFragment * p_fragment, const std::vector<S
 		DAEDALUS_ASSERT( jump.IsSet(), "No exit jump?" );
 		#endif
 
-#ifdef DAEDALUS_DEBUG_DYNAREC
-		CFragment * p_fragment( LookupFragment( target_address ) );
-#else
-		CFragment * p_fragment( LookupFragmentQ( target_address ) );
-#endif
-		if( p_fragment != nullptr )
+		// Decode the unlinked fallback target (Buffer B interpret_next_fragment stub)
+		// from the ARM B instruction before patching it to a direct fragment target.
+		CCodeLabel fallback( nullptr );
+#ifdef DAEDALUS_CTR
 		{
-			PatchJumpLongAndFlush( jump, p_fragment->GetEntryTarget() );
+			const u32 insn = *reinterpret_cast<const u32 *>( jump.GetTargetU8P() );
+			const s32 rel_bytes = (static_cast<s32>(insn << 8) >> 6) + 8;
+			fallback = CCodeLabel( jump.GetTargetU8P() + rel_bytes );
+		}
+#endif
+		SFragmentJumpLink link = { jump, fallback, p_fragment };
+
+#ifdef DAEDALUS_DEBUG_DYNAREC
+		CFragment * p_target( LookupFragment( target_address ) );
+#else
+		CFragment * p_target( LookupFragmentQ( target_address ) );
+#endif
+		if( p_target != nullptr )
+		{
+			PatchJumpLongAndFlush( jump, p_target->GetEntryTarget() );
+			p_target->AddIncomingLink( link );
 
 	#ifdef DAEDALUS_ENABLE_ASSERTS
 			DAEDALUS_ASSERT( mJumpMap.find( target_address ) == mJumpMap.end(), "Jump map still contains an entry for this" );
@@ -281,7 +318,7 @@ void CFragmentCache::InsertFragment( CFragment * p_fragment, const std::vector<S
 		else if( target_address != u32(~0) )
 		{
 			// Store the address for later processing
-			mJumpMap[ target_address ].push_back( jump );
+			mJumpMap[ target_address ].push_back( link );
 		}
 	}
 
@@ -334,12 +371,163 @@ void CFragmentCache::Clear()
 	mCachedFragmentAddress = 0;
 	mpCachedFragment = nullptr;
 	memset( mpCacheHashTable, 0, sizeof(mpCacheHashTable) );
+	memset( gIndirectJumpTable, 0, sizeof(gIndirectJumpTable) );
 	mJumpMap.clear();
+#ifdef DAEDALUS_CTR
+	PerfCTR::CountCacheReset();
+#endif
 
 	mCacheCoverage.Reset();
 
 	if (mpCodeBufferManager != nullptr)
 		mpCodeBufferManager->Reset();
+}
+
+//*************************************************************************************
+//
+//*************************************************************************************
+bool CFragmentCache::InvalidateRange( u32 address, u32 length, u32 * out_evicted )
+{
+	if (out_evicted != nullptr)
+		*out_evicted = 0;
+
+#ifndef DAEDALUS_CTR
+	(void)address;
+	(void)length;
+	return false;
+#else
+	static const u32 RDRAM_SIZE = 8u * 1024u * 1024u;
+	if (length == 0)
+		return true;
+
+	u32 phys_start = 0;
+	if (address < RDRAM_SIZE)
+	{
+		phys_start = address;
+	}
+	else
+	{
+		const u32 seg = address & 0xE0000000u;
+		if (seg != 0x80000000u && seg != 0xA0000000u)
+			return false;
+		phys_start = address & 0x1FFFFFFFu;
+		if (phys_start >= RDRAM_SIZE)
+			return true;
+	}
+	u64 end64 = static_cast<u64>(phys_start) + static_cast<u64>(length);
+	if (end64 > RDRAM_SIZE)
+		end64 = RDRAM_SIZE;
+	if (end64 <= phys_start)
+		return true;
+	const u32 phys_end = static_cast<u32>(end64);
+
+	std::vector<CFragment *> evicted;
+	evicted.reserve(64);
+	for (size_t i = 0; i < mFragments.size(); ++i)
+	{
+		CFragment * f = mFragments[i].Fragment;
+		if (f->OverlapsRange(phys_start, phys_end))
+		{
+			if (f->IsOshleFragment())
+				return false;
+			evicted.push_back(f);
+			if (evicted.size() > 256 || evicted.size() * 2 >= mFragments.size())
+				return false;
+		}
+	}
+
+	if (evicted.empty())
+		return true;
+
+	// 1) Mark all evicted fragments first so cross-links among evicted fragments are skipped.
+	for (size_t i = 0; i < evicted.size(); ++i)
+		evicted[i]->SetEvicted(true);
+
+	// 2) Unpatch incoming direct jumps from surviving fragments back to their Buffer B
+	//    unlinked fallback stubs, and re-register them in mJumpMap for future re-linking.
+	for (size_t i = 0; i < evicted.size(); ++i)
+	{
+		CFragment * f = evicted[i];
+		const u32 entry_addr = f->GetEntryAddress();
+		const std::vector<SFragmentJumpLink> & links = f->GetIncomingLinks();
+		for (size_t j = 0; j < links.size(); ++j)
+		{
+			if (!links[j].Owner->IsEvicted() && links[j].Fallback.IsSet())
+			{
+				PatchJumpLongAndFlush(links[j].Jump, links[j].Fallback);
+				mJumpMap[entry_addr].push_back(links[j]);
+			}
+		}
+	}
+
+	// 3) Purge pending jump-map entries owned by evicted fragments.
+	for (JumpMap::iterator it = mJumpMap.begin(); it != mJumpMap.end(); )
+	{
+		JumpList & list = it->second;
+		size_t write = 0;
+		for (size_t i = 0; i < list.size(); ++i)
+		{
+			if (!list[i].Owner->IsEvicted())
+			{
+				if (write != i)
+					list[write] = list[i];
+				++write;
+			}
+		}
+		if (write == 0)
+		{
+			JumpMap::iterator erase_it = it++;
+			mJumpMap.erase(erase_it);
+		}
+		else
+		{
+			list.resize(write);
+			++it;
+		}
+	}
+
+	// 4) Compact mFragments, rebuild exact 64-byte coverage bitmap, clean surviving
+	//    incoming link lists and indirect MRU caches.
+	mCacheCoverage.Reset();
+	size_t keep = 0;
+	for (size_t i = 0; i < mFragments.size(); ++i)
+	{
+		CFragment * f = mFragments[i].Fragment;
+		if (f->IsEvicted())
+		{
+			const u32 mu = f->GetMemoryUsage();
+			const u32 il = f->GetInputLength();
+			const u32 ol = f->GetOutputLength();
+			mMemoryUsage  = (mMemoryUsage > mu)  ? (mMemoryUsage - mu)  : 0;
+			mInputLength  = (mInputLength > il)  ? (mInputLength - il)  : 0;
+			mOutputLength = (mOutputLength > ol) ? (mOutputLength - ol) : 0;
+			delete f;
+		}
+		else
+		{
+			f->RemoveEvictedIncomingLinks();
+			if (CIndirectExitMap * imap = f->GetIndirectExitMap())
+				imap->ClearMru();
+			const std::vector<SFragmentCoveredRange> & ranges = f->GetCoveredRanges();
+			for (size_t r = 0; r < ranges.size(); ++r)
+				mCacheCoverage.ExtendCoverage(ranges[r].Start, ranges[r].End - ranges[r].Start);
+			if (keep != i)
+				mFragments[keep] = mFragments[i];
+			++keep;
+		}
+	}
+	mFragments.erase(mFragments.begin() + keep, mFragments.end());
+
+	// 5) Clear fragment lookup and global indirect jump caches.
+	mCachedFragmentAddress = 0;
+	mpCachedFragment = nullptr;
+	memset( mpCacheHashTable, 0, sizeof(mpCacheHashTable) );
+	memset( gIndirectJumpTable, 0, sizeof(gIndirectJumpTable) );
+
+	if (out_evicted != nullptr)
+		*out_evicted = static_cast<u32>(evicted.size());
+	return true;
+#endif
 }
 
 //*************************************************************************************
