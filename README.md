@@ -60,7 +60,7 @@ sdmc:/
 > If you install **`DaedalusX64.cia`** via **FBI**, the ROMs directory remains the same: `sdmc:/3ds/DaedalusX64/Roms/`.
 
 ### 3. Controls
-- **`SELECT`**: opens the in-game pause menu (Frameskip, Audio, CPU Speed Hack, Viewport, Save/Load State).
+- **`SELECT`** + **`START`**: opens the in-game pause menu (Frameskip, Audio, CPU Speed Hack, Viewport, Save/Load State).
 - **`L` / `R`** (in the main menu): switches between `Original (PSX3D)` and `N64 Classic` themes.
 - **Circle Pad**: N64 analog stick | **D-Pad / Buttons**: per-ROM configurable mapping.
 
