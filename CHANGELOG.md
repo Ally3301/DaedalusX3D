@@ -4,6 +4,38 @@ All notable changes to **DaedalusX3D (Old 3DS Edition)** are documented in this 
 
 ---
 
+## [v0.1.1-Stable] — 2026-11-20
+
+Major frontend overhaul delivering a native Nintendo 3DS / CTR64-inspired visual design, interactive bottom-screen physical-extension controls during gameplay, automatic on-device Wi-Fi box-art scraping, frosted frozen-game pause overlay, and critical ARM DynaRec 64-bit FPU compatibility fixes.
+
+### Frontend & User Experience (`Source/SysCTR/UI/`)
+- **Modular 3DS-native Citro3D UI engine** (`UITheme`, `UIAtlas`, `UIRenderer`, `UITouchInput`): replaced the monolithic 2,392-line bitmap-font frontend and removed 14 dead legacy `PSX3D*` files.
+- **Single-atlas proportional typography & SDF shapes (`UIAtlas`)**: packs `Roboto-Medium.ttf` in two crisp proportional sizes, 9-slice anti-aliased rounded cards and 2px focus borders, smooth circles/rings, and 22 procedural vector icons into a single `256×256` RGBA8888 texture (1 draw call per screen).
+- **Light & Dark 3DS themes (`Y` toggle)**: authentic 3DS matte striped canvas, `#1DB7F2` cyan selection rings, dark charcoal hint bar with circular `(A)/(B)/(X)/(Y)` and pill `[L/R]`/`START` badges, plus *Midnight* and *Stealth* themes.
+- **Smooth spring animations & frozen-game Pause Menu**: 2D spring-gliding focus ring across the 3×3 pause grid, ROM list, options, and controls screens; captures a 2× soft-focus snapshot of the live N64 top screen behind an animated frosted pause banner (`Resume`, `Save`, `Load`, `Slot 0–4`, `Audio`, `Video`, `Controls`, `Reset`, `Game list`, `Exit`).
+- **Interactive Bottom-Screen Physical-Extension Controls (`TouchControllerCTR`, `Citro3DContext`, `GraphicsContextCTR`, `InputManagerCTR`)**:
+  - **4-way Yellow N64 C-Buttons Cross (`C-Cross`, default)** with elastic capture and diagonal slide-across for camera and items.
+  - Live 1-tap mode cycling between **C-Cross**, **Virtual C-Stick Camera** (360° 8-way), **Dual-Analog Shooter** (Touch Stick → N64 Main Stick, Circle Pad → C-Buttons), **Virtual N64 D-Pad**, and **Sleep** (pure black battery saver).
+  - Dedicated **Z Trigger** + **Z-Lock** toggle, hold-guarded (`0.35s`) **Quick Save / Quick Load**, and compact top HUD strip (live FPS, 1-tap Mute, 3DS Battery, Mode, Sleep, Pause).
+  - **Dirty-driven bottom rendering** using a dedicated vertex pool with zero `GX_MemoryFill` / `C3D_FrameSplit` and 0 DMA cost on idle frames.
+  - Interactive **Pause → Controls** screen with visual layout schematic, handedness flip, Z-trigger mode, deadzone, sensitivity, and Y-inversion persisted to `touch_config.ini`.
+- **Automatic On-Device Box-Art Scraper (`CoverScraperCTR`)**: low-priority background thread using 3DS `httpc` + `ACU_GetWifiStatus` that fetches missing N64 covers from `libretro-thumbnails`, box-downsamples them via `libpng` to compact `≤ 128×128` PNGs under `sdmc:/3ds/DaedalusX64/Resources/Preview/`, prioritizes the highlighted ROM, and refreshes the hero showcase automatically.
+
+### CPU, ARM DynaRec & Audio Compatibility
+- **Odd-numbered 64-bit FP registers in ARM DynaRec** (`CodeGeneratorARM.cpp`): fixed `$f7` / odd double-precision register handling across `GenerateSDC1`, `GenerateMOV_D`, `GenerateCMP_D`, and all `*.D` arithmetic/conversion ops (fixes *Conker's Bad Fur Day* 3D display-list corruption and DP FullSync deadlock).
+- **Interpreter overlapping `MOV.D` & 64-bit known-value fixes**: fixed `R4300_Cop1_D_MOV` register-pair overlap (`R4300.cpp`), `GenerateOR`/`GenerateORI` 64-bit known-value guards, and lazy sign-extension self-overwrite flushes (`CodeGeneratorARM.cpp`).
+- **Audio `ucode_data` bounds check** (`HLEMain.cpp`): masks and validates `pTask->t.ucode_data` against `gRamSize` before reading audio ABI signatures.
+
+### Documentation & Tests
+- Added dual-screen screenshots (`docs/screenshots/`) to [README.md](README.md) and [README.pt-BR.md](README.pt-BR.md).
+- Expanded host unit test suite (`tests/ctr_host/run.sh`) to 127 checks with automated tests for `UITheme`, `UITouchInput`, `TouchPadEngine`, and `CoverScraper`.
+
+### Release Artifacts
+- `DaedalusX64.3dsx` — Homebrew Launcher (`sdmc:/3ds/DaedalusX64/DaedalusX64.3dsx`)
+- `DaedalusX64.cia` — Home Menu installation via **FBI**
+
+---
+
 ## [v0.1.0-Stable] — 2026-11-20
 
 First stable Old 3DS release featuring the native **Citro3D / PICA200** graphics backend, major **ARMv6K DynaRec** optimizations, **Core 1/2 asynchronous HLE audio offload**, and **selective fragment-cache invalidation** — delivering playable no-frameskip performance with clean audio on **Old Nintendo 3DS / 2DS** in titles such as *Super Smash Bros.* and *Mario Kart 64*.

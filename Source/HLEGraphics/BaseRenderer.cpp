@@ -1664,7 +1664,8 @@ void BaseRenderer::SetNewVertexInfoConker(u32 address, u32 v0, u32 n)
 void BaseRenderer::SetNewVertexInfoDKR(u32 address, u32 v0, u32 n, bool billboard)
 {
 #ifdef DAEDALUS_CTR
-	mVtxPackedColourValid = false;
+	const u64 vtx_t0 = svcGetSystemTick();
+	mVtxPackedColourValid = true;
 #endif
 	u32 pVtxBase {u32(g_pu8RamBase + address)};
 	const Matrix4x4 & mat_world_project {mModelViewStack[mDKRMatIdx]};
@@ -1681,6 +1682,38 @@ void BaseRenderer::SetNewVertexInfoDKR(u32 address, u32 v0, u32 n, bool billboar
 
 #ifdef DAEDALUS_PSP_USE_VFPU
 		_TnLVFPUDKRB( n, &mModelViewStack[0], (const FiddledVtx*)pVtxBase, &mVtxProjected[v0] );
+#elif defined(DAEDALUS_CTR)
+		const v4 & BaseVec( mVtxProjected[0].TransformedPos );
+
+		//Hack to worldproj matrix to scale and rotate billboards //Corn
+		Matrix4x4 mat( mModelViewStack[0] );
+		const f32 sx = mModelViewStack[2].mRaw[0] * 0.5f;
+		const f32 sy = mModelViewStack[2].mRaw[0] * 0.375f;
+		const f32 sz = mModelViewStack[2].mRaw[10] * 0.5f;
+		const f32 m00 = mat.mRaw[0] * sx, m10 = mat.mRaw[4] * sx, m20 = mat.mRaw[8] * sx;
+		const f32 m01 = mat.mRaw[1] * sy, m11 = mat.mRaw[5] * sy, m21 = mat.mRaw[9] * sy;
+		const f32 m02 = mat.mRaw[2] * sz, m12 = mat.mRaw[6] * sz, m22 = mat.mRaw[10] * sz;
+
+		for (u32 i = v0; i < v0 + n; i++)
+		{
+			const f32 wx = (f32)(*(s16*)((pVtxBase + 0) ^ 2));
+			const f32 wy = (f32)(*(s16*)((pVtxBase + 2) ^ 2));
+			const f32 wz = (f32)(*(s16*)((pVtxBase + 4) ^ 2));
+
+			DaedalusVtx4 & out = mVtxProjected[i];
+			out.TransformedPos.x = BaseVec.x + wx * m00 + wy * m10 + wz * m20;
+			out.TransformedPos.y = BaseVec.y + wx * m01 + wy * m11 + wz * m21;
+			out.TransformedPos.z = BaseVec.z + wx * m02 + wy * m12 + wz * m22;
+			out.TransformedPos.w = 1.0f;
+			out.ClipFlags = 0;
+
+			const u32 WL = *(u16*)((pVtxBase + 6) ^ 2);
+			const u32 WH = *(u16*)((pVtxBase + 8) ^ 2);
+			out.Pad = c32((u8)(WL >> 8), (u8)(WL & 0xFF), (u8)(WH >> 8), (u8)(WH & 0xFF)).GetColour();
+
+			pVtxBase += 10;
+		}
+		PerfCTR::AddVtx(svcGetSystemTick() - vtx_t0);
 #else
 		v4 & BaseVec( mVtxProjected[0].TransformedPos );
 
@@ -1738,6 +1771,67 @@ void BaseRenderer::SetNewVertexInfoDKR(u32 address, u32 v0, u32 n, bool billboar
 		}
 #ifdef DAEDALUS_PSP_USE_VFPU
 		_TnLVFPUDKR( n, &mat_world_project, (const FiddledVtx*)pVtxBase, &mVtxProjected[v0] );
+#elif defined(DAEDALUS_CTR)
+		DaedalusVtx4 * __restrict dst = &mVtxProjected[v0];
+		for (u32 k = 0; k < n; ++k)
+		{
+			DaedalusVtx4 & out = dst[k];
+			out.TransformedPos.x = (f32)(*(s16*)((pVtxBase + 0) ^ 2));
+			out.TransformedPos.y = (f32)(*(s16*)((pVtxBase + 2) ^ 2));
+			out.TransformedPos.z = (f32)(*(s16*)((pVtxBase + 4) ^ 2));
+			out.TransformedPos.w = 1.0f;
+
+			const u32 WL = *(u16*)((pVtxBase + 6) ^ 2);
+			const u32 WH = *(u16*)((pVtxBase + 8) ^ 2);
+			out.Pad = c32((u8)(WL >> 8), (u8)(WL & 0xFF), (u8)(WH >> 8), (u8)(WH & 0xFF)).GetColour();
+
+			pVtxBase += 10;
+		}
+
+		// ARM11 VFPv2 LEN=4 hardware vector projection: ProjectedPos = TransformedPos * mat_world_project
+		if (n > 0)
+		{
+			u32 old_fpscr, vec_fpscr, cnt;
+			u8 * p_in  = reinterpret_cast<u8 *>(dst);      // &dst[0].TransformedPos
+			u8 * p_out = reinterpret_cast<u8 *>(dst) + 16; // &dst[0].ProjectedPos
+			__asm__ volatile (
+				"fmrx   %[old_f], fpscr\n\t"
+				"bic    %[vec_f], %[old_f], #0x00370000\n\t"
+				"orr    %[vec_f], %[vec_f], #0x00030000\n\t"
+				"fmxr   fpscr, %[vec_f]\n\t"
+
+				"vldmia %[mwp], {s16-s31}\n\t"
+				"mov    %[cnt], %[n_in]\n\t"
+				"1:\n\t"
+				"vldmia %[pin], {s0-s2}\n\t"
+				"vmov.f32 s8, s28\n\t"
+				"vmla.f32 s8, s16, s0\n\t"
+				"vmla.f32 s8, s20, s1\n\t"
+				"vmla.f32 s8, s24, s2\n\t"
+				"vstmia %[pout], {s8-s11}\n\t"
+				"add    %[pin], %[pin], #64\n\t"
+				"add    %[pout], %[pout], #64\n\t"
+				"subs   %[cnt], %[cnt], #1\n\t"
+				"bne    1b\n\t"
+
+				"fmxr   fpscr, %[old_f]\n\t"
+				: [pin] "+&r" (p_in), [pout] "+&r" (p_out),
+				  [old_f] "=&r" (old_fpscr), [vec_f] "=&r" (vec_fpscr),
+				  [cnt] "=&r" (cnt)
+				: [mwp] "r" (mat_world_project.mRaw), [n_in] "r" (n)
+				: "s0", "s1", "s2",
+				  "s8", "s9", "s10", "s11",
+				  "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
+				  "s24", "s25", "s26", "s27", "s28", "s29", "s30", "s31",
+				  "cc", "memory"
+			);
+		}
+
+		for (u32 k = 0; k < n; ++k)
+		{
+			dst[k].ClipFlags = set_clip_flags(dst[k].ProjectedPos);
+		}
+		PerfCTR::AddVtx(svcGetSystemTick() - vtx_t0);
 #else
 		for (u32 i = v0; i < v0 + n; i++)
 		{

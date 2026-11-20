@@ -43,12 +43,12 @@ struct SIndirectJumpEntry
 	const void * target;
 };
 
-static const u32 INDIRECT_JUMP_TABLE_BITS = 12;
+static const u32 INDIRECT_JUMP_TABLE_BITS = 13;
 static const u32 INDIRECT_JUMP_TABLE_SIZE = 1u << INDIRECT_JUMP_TABLE_BITS;
 
 inline u32 IndirectJumpTableIndex( u32 addr )
 {
-	return ((addr >> 2) ^ (addr >> 14)) & (INDIRECT_JUMP_TABLE_SIZE - 1);
+	return ((addr >> 2) ^ (addr >> 15)) & (INDIRECT_JUMP_TABLE_SIZE - 1);
 }
 
 extern "C" SIndirectJumpEntry gIndirectJumpTable[INDIRECT_JUMP_TABLE_SIZE];

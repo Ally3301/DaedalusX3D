@@ -51,9 +51,9 @@ void sceGuSetMatrix(int type, const ScePspFMatrix4 * mtx)
 	}
 }
 
-void RendererCTR::InstallNativeTexture(const CNativeTexture * texture, u32 wrap_s, u32 wrap_t, int unit)
+void RendererCTR::InstallNativeTexture(const CNativeTexture * texture, u32 wrap_s, u32 wrap_t, int unit, bool setTexEnabled)
 {
-	if (unit == 0)
+	if (unit == 0 && setTexEnabled)
 		Citro3D::SetTextureEnabled(true);
 	const u32 cycle_mode = gRDPOtherMode.cycle_type;
 	const GPU_TEXTURE_FILTER_PARAM filt = (((gRDPOtherMode.text_filt != G_TF_POINT) && cycle_mode != CYCLE_COPY) ||
@@ -696,7 +696,7 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 		if (prog.usesTex0)
 		{
 			if (mBoundTexture[0] != nullptr)
-				InstallNativeTexture(mBoundTexture[0], mTexWrap[0].u, mTexWrap[0].v, 0);
+				InstallNativeTexture(mBoundTexture[0], mTexWrap[0].u, mTexWrap[0].v, 0, false);
 			else
 				texturesOk = false;
 		}
@@ -704,7 +704,7 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 		{
 			if (mBoundTexture[1] != nullptr)
 			{
-				InstallNativeTexture(mBoundTexture[1], mTexWrap[1].u, mTexWrap[1].v, 1);
+				InstallNativeTexture(mBoundTexture[1], mTexWrap[1].u, mTexWrap[1].v, 1, false);
 
 				// Compute exact TEXUNIT1 UV transform relative to TEXUNIT0 vertices.
 				const CNativeTexture * t0 = mBoundTexture[0];
@@ -731,7 +731,7 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 			else if (mBoundTexture[0] != nullptr)
 			{
 				// Some games reference TEXEL1 while only tile 0 is bound; mirror tile 0 safely.
-				InstallNativeTexture(mBoundTexture[0], mTexWrap[0].u, mTexWrap[0].v, 1);
+				InstallNativeTexture(mBoundTexture[0], mTexWrap[0].u, mTexWrap[0].v, 1, false);
 				Citro3D::SetUv1Transform(1.0f, 1.0f, 0.0f, 0.0f);
 			}
 			else
@@ -862,27 +862,33 @@ void RendererCTR::TexRect(u32 tile_idx, const v2 & xy0, const v2 & xy1, TexCoord
 
 	const f32 depth = gRDPOtherMode.depth_source ? mPrimDepth : 0.0f;
 
-	float scale_x = texture->GetScaleX();
-	float scale_y = texture->GetScaleY();
+	const float scale_x = texture->GetScaleX();
+	const float scale_y = texture->GetScaleY();
+	const float u0 = uv0.x * scale_x;
+	const float v0 = uv0.y * scale_y;
+	const float u1 = uv1.x * scale_x;
+	const float v1 = uv1.y * scale_y;
 
-	DaedalusVtx p_vertices[6];
+	// Write directly into gVtxBuffer when space allows (zero-copy fast path in DrawPrimitives).
+	DaedalusVtx stack_verts[6];
+	DaedalusVtx * p_vertices = (gVtxBuffer != nullptr && gVertexCount <= gMaxVertices - 6) ? gVtxBuffer : stack_verts;
 
-	p_vertices[0].Texture.x = uv0.x * scale_x;
-	p_vertices[0].Texture.y = uv0.y * scale_y;
+	p_vertices[0].Texture.x = u0;
+	p_vertices[0].Texture.y = v0;
 	p_vertices[0].Position.x = screen0.x;
 	p_vertices[0].Position.y = screen0.y;
 	p_vertices[0].Position.z = depth;
 	p_vertices[0].Colour = c32(0xffffffff);
 
-	p_vertices[1].Texture.x = uv1.x * scale_x;
-	p_vertices[1].Texture.y = uv0.y * scale_y;
+	p_vertices[1].Texture.x = u1;
+	p_vertices[1].Texture.y = v0;
 	p_vertices[1].Position.x = screen1.x;
 	p_vertices[1].Position.y = screen0.y;
 	p_vertices[1].Position.z = depth;
 	p_vertices[1].Colour = c32(0xffffffff);
 
-	p_vertices[2].Texture.x = uv0.x * scale_x;
-	p_vertices[2].Texture.y = uv1.y * scale_y;
+	p_vertices[2].Texture.x = u0;
+	p_vertices[2].Texture.y = v1;
 	p_vertices[2].Position.x = screen0.x;
 	p_vertices[2].Position.y = screen1.y;
 	p_vertices[2].Position.z = depth;
@@ -891,8 +897,8 @@ void RendererCTR::TexRect(u32 tile_idx, const v2 & xy0, const v2 & xy1, TexCoord
 	p_vertices[3] = p_vertices[2];
 	p_vertices[4] = p_vertices[1];
 
-	p_vertices[5].Texture.x = uv1.x * scale_x;
-	p_vertices[5].Texture.y = uv1.y * scale_y;
+	p_vertices[5].Texture.x = u1;
+	p_vertices[5].Texture.y = v1;
 	p_vertices[5].Position.x = screen1.x;
 	p_vertices[5].Position.y = screen1.y;
 	p_vertices[5].Position.z = depth;

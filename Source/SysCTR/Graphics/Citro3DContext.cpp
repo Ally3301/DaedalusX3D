@@ -354,6 +354,47 @@ bool IsGameFrameActive()
 	return sGameFrameOpen;
 }
 
+bool BeginGameBottomPass()
+{
+	if (!sInitialised || !sBotTarget)
+		return false;
+
+	if (!sGameFrameOpen)
+		EnsureGameFrameBegun();
+
+	CommitPendingBatch();
+	sActiveTarget = sBotTarget;
+	C3D_FrameDrawOn(sBotTarget);
+
+	InvalidateStateCache();
+	for (int i = 1; i < 6; ++i)
+		C3D_TexEnvInit(C3D_GetTexEnv(i));
+	C3D_TexEnvBufUpdate(C3D_Both, 0);
+	SetUv1Transform(1.0f, 1.0f, 0.0f, 0.0f);
+	SetScissorLandscape(false, 0, 0, 320, 240, 320, 240);
+	SetViewportLandscape(0, 0, 320, 240, 320, 240);
+	SetDepthState(false, false, false);
+	SetCullMode(false, true);
+	SetAlphaTest(false);
+	SetBlendState(true, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
+	SetTextureEnabled(true);
+	SetTexEnvMode(CTR_TEXENV_MODULATE);
+
+	C3D_Mtx proj;
+	Mtx_OrthoTilt(&proj, 0.0f, 320.0f, 240.0f, 0.0f, -1.0f, 1.0f, true);
+	SetProjectionMtx(&proj);
+	return true;
+}
+
+void EndGameBottomPass()
+{
+	if (!sInitialised || !sGameFrameOpen)
+		return;
+	CommitPendingBatch();
+	sActiveTarget = sTopTarget;
+	InvalidateStateCache();
+}
+
 void BeginUIFrame()
 {
 	if (!sInitialised)

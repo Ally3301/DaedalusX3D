@@ -139,6 +139,17 @@ class CCodeGeneratorARM : public CCodeGenerator, public CAssemblyWriterARM
 				bool mMultIsValid;
 
 	private:
+				inline bool IsSignExtended32( EN64Reg reg ) const
+				{
+					if (reg == N64Reg_R0)
+						return true;
+					if (mRegisterCache.IsHiSignExtended(reg))
+						return true;
+					if (mRegisterCache.IsKnownValue(reg, 0) && mRegisterCache.IsKnownValue(reg, 1))
+						return (mRegisterCache.GetKnownValue(reg, 0)._s32 >> 31) == mRegisterCache.GetKnownValue(reg, 1)._s32;
+					return false;
+				}
+
 				bool	GenerateCACHE( EN64Reg base, s16 offset, u32 cache_op );
 
 				typedef u32 (*ReadMemoryFunction)( u32 address, u32 current_pc );
@@ -151,9 +162,13 @@ class CCodeGeneratorARM : public CCodeGenerator, public CAssemblyWriterARM
 				bool	GenerateSH( u32 address, bool branch_delay_slot, EN64Reg rt, EN64Reg base, s16 offset );
 				bool	GenerateSD( u32 address, bool branch_delay_slot, EN64Reg rt, EN64Reg base, s16 offset );
 				bool	GenerateSB( u32 address, bool branch_delay_slot, EN64Reg rt, EN64Reg base, s16 offset );
+				bool	GenerateSWL( OpCode op_code, EN64Reg rt, EN64Reg base, s16 offset );
+				bool	GenerateSWR( OpCode op_code, EN64Reg rt, EN64Reg base, s16 offset );
 
 				void	GenerateLoad( u32 address, EArmReg arm_dest, EN64Reg base, s16 offset, u8 twiddle, u8 bits, bool is_signed, ReadMemoryFunction p_read_memory );
 				bool	GenerateLW( u32 address, bool branch_delay_slot, EN64Reg rt, EN64Reg base, s16 offset );
+				bool	GenerateLWL( OpCode op_code, EN64Reg rt, EN64Reg base, s16 offset );
+				bool	GenerateLWR( OpCode op_code, EN64Reg rt, EN64Reg base, s16 offset );
 				bool	GenerateLD( u32 address, bool branch_delay_slot, EN64Reg rt, EN64Reg base, s16 offset );
 				bool	GenerateLB( u32 address, bool branch_delay_slot, EN64Reg rt, EN64Reg base, s16 offset );
 				bool	GenerateLBU( u32 address, bool branch_delay_slot, EN64Reg rt, EN64Reg base, s16 offset );
@@ -178,8 +193,11 @@ class CCodeGeneratorARM : public CCodeGenerator, public CAssemblyWriterARM
 
 				//Special Op
 				void 	GenerateMFC0( EN64Reg rt, u32 fs );
+				void 	GenerateMTC0( u32 fs, EN64Reg rt );
 				void	GenerateMFC1( EN64Reg rt, u32 fs );
+				void	GenerateDMFC1( EN64Reg rt, u32 fs );
 				void	GenerateMTC1( u32 fs, EN64Reg rt );
+				void	GenerateDMTC1( u32 fs, EN64Reg rt );
 				void	GenerateCFC1( EN64Reg rt, u32 fs );
 				void	GenerateCTC1( u32 fs, EN64Reg rt );
 
@@ -240,9 +258,11 @@ class CCodeGeneratorARM : public CCodeGenerator, public CAssemblyWriterARM
 				void	GenerateMOV_S( u32 fd, u32 fs );
 				void	GenerateNEG_S( u32 fd, u32 fs );
 				void	GenerateTRUNC_W_S( u32 fd, u32 fs );
+				void	GenerateTRUNC_L_S( u32 fd, u32 fs );
 				void	GenerateCVT_W_S( u32 fd, u32 fs );
 				void	GenerateCVT_D_S( u32 fd, u32 fs );
 				void	GenerateCVT_S_W( u32 fd, u32 fs );
+				void	GenerateCVT_S_L( u32 fd, u32 fs );
 				void	GenerateCVT_D_W( u32 fd, u32 fs );
 				void	GenerateCMP_S( u32 fs, u32 ft, EArmCond cond, u8 E );
 

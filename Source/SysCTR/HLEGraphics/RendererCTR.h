@@ -103,7 +103,7 @@ private:
 	u32					mFastWrap1V;
 	bool				mFastHasTex;
 
-	void				InstallNativeTexture(const CNativeTexture * texture, u32 wrap_s = GPU_CLAMP_TO_EDGE, u32 wrap_t = GPU_CLAMP_TO_EDGE, int unit = 0);
+	void				InstallNativeTexture(const CNativeTexture * texture, u32 wrap_s = GPU_CLAMP_TO_EDGE, u32 wrap_t = GPU_CLAMP_TO_EDGE, int unit = 0, bool setTexEnabled = true);
 	void				ApplyProjectionMatrix(const float (&mat_project)[16]);
 	void				InitBlenderModeCached();
 };

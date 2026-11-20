@@ -2917,9 +2917,11 @@ static void R4300_CALL_TYPE R4300_Cop1_D_MOV( R4300_CALL_SIGNATURE )
 // 	SET_ROUND_MODE( gRoundingMode );		//XXXX Is this needed?
 
 #if 1
-	//Fast way, just copy registers //Corn
-	gCPUState.FPU[op_code.fd+0]._u32 = gCPUState.FPU[op_code.fs+0]._u32;
-	gCPUState.FPU[op_code.fd+1]._u32 = gCPUState.FPU[op_code.fs+1]._u32;
+	//Fast way, just copy registers (temp locals handle overlapping odd/even regs e.g. mov.d $f8, $f7 in Conker)
+	const u32 lo = gCPUState.FPU[op_code.fs+0]._u32;
+	const u32 hi = gCPUState.FPU[op_code.fs+1]._u32;
+	gCPUState.FPU[op_code.fd+0]._u32 = lo;
+	gCPUState.FPU[op_code.fd+1]._u32 = hi;
 #else
 	// fd = fs
 	d64 fX {LoadFPR_Double( op_code.fs )};

@@ -39,6 +39,7 @@ class AudioOutput
 		// Management functions
 		void				StopAudio( );						// Stops the Audio PlayBack (as if paused)
 		void				StartAudio( );						// Starts the Audio PlayBack (as if unpaused)
+		bool				IsPlaying() const { return mAudioPlaying; }
 
 	public:
 		void				FillBuffer( Sample * buffer, u32 num_samples );

@@ -41,6 +41,9 @@ namespace FrontendCTR
 
 	// Release any resources that must not be held during emulation.
 	void ReleaseAssets();
+
+	// Returns true once if the user chose "Reset" from the pause menu.
+	bool ConsumeResetRequest();
 }
 
 #endif // FRONTEND_CTR_H

@@ -52,7 +52,7 @@ extern bool isN3DS;
 namespace
 {
 	constexpr u32 kMaxAsyncAlistWords = 4096; // 16 KiB (2048 audio commands)
-	constexpr u32 kMaxAsyncOutRanges  = 16;
+	constexpr u32 kMaxAsyncOutRanges  = 64;
 
 	struct SOutRange
 	{
@@ -63,9 +63,19 @@ namespace
 	Thread            sAudioWorkerThread = nullptr;
 	LightEvent        sAudioStartEvent;
 	LightEvent        sAudioDoneEvent;
+	LightLock         sAudioAsyncLock;
 	bool              sAudioEventsInit   = false;
 	std::atomic<bool> sAudioWorkerQuit{ false };
 	std::atomic<bool> sAudioTaskBusy{ false };
+
+	// Deferred AddBuffer handoff: when a single-buffered audio game (e.g. DKR / ABI3)
+	// calls osAiSetNextBuffer on the buffer currently being synthesized on Core 1,
+	// hand off (out, addr, len) to Core 1 so Core 0 never stalls waiting for synthesis.
+	AudioOutput *     sDeferredAddOut     = nullptr;
+	u32               sDeferredAddAddr    = 0;
+	u32               sDeferredAddLen     = 0;
+	bool              sDeferredAddPending = false;
+	bool              sDeferredAddActive  = false;
 
 	OSTask            sAsyncTask;
 	u32               sAsyncAlistWords[kMaxAsyncAlistWords];
@@ -113,16 +123,34 @@ namespace
 						len = (lastSetBuffCount + 3u) & ~3u;
 				}
 				const u32 span = (len > 0 && len <= 16384u) ? len : 4096u;
-				if (sAsyncOutCount < kMaxAsyncOutRanges)
+				const u32 rStart = dst;
+				const u32 rEnd   = dst + span;
+				// Coalesce adjacent/overlapping slices (critical for ABI3 games like DKR that
+				// emit 16-32 consecutive 0x170-byte SAVEBUFF3 commands into one audio buffer).
+				bool merged = false;
+				for (u32 r = 0; r < sAsyncOutCount; ++r)
 				{
-					sAsyncOutRanges[sAsyncOutCount].start = dst;
-					sAsyncOutRanges[sAsyncOutCount].end   = dst + span;
-					++sAsyncOutCount;
+					if (rStart <= sAsyncOutRanges[r].end && rEnd >= sAsyncOutRanges[r].start)
+					{
+						if (rStart < sAsyncOutRanges[r].start) sAsyncOutRanges[r].start = rStart;
+						if (rEnd   > sAsyncOutRanges[r].end)   sAsyncOutRanges[r].end   = rEnd;
+						merged = true;
+						break;
+					}
 				}
-				else
+				if (!merged)
 				{
-					sAsyncOutConservative = true;
-					return;
+					if (sAsyncOutCount < kMaxAsyncOutRanges)
+					{
+						sAsyncOutRanges[sAsyncOutCount].start = rStart;
+						sAsyncOutRanges[sAsyncOutCount].end   = rEnd;
+						++sAsyncOutCount;
+					}
+					else
+					{
+						sAsyncOutConservative = true;
+						return;
+					}
 				}
 			}
 		}
@@ -157,8 +185,32 @@ namespace
 				const u64 t0 = svcGetSystemTick();
 				Audio_Ucode_Task_WithAlist(sAsyncTask, sAsyncAlistWords, sAsyncNumCmds);
 				PerfCTR::AddAudC1(svcGetSystemTick() - t0);
-				sAudioTaskBusy.store(false, std::memory_order_release);
-				LightEvent_Signal(&sAudioDoneEvent);
+
+				while (true)
+				{
+					AudioOutput * deferredOut = nullptr;
+					u32 deferredAddr = 0;
+					u32 deferredLen  = 0;
+
+					LightLock_Lock(&sAudioAsyncLock);
+					if (sDeferredAddPending)
+					{
+						deferredOut  = sDeferredAddOut;
+						deferredAddr = sDeferredAddAddr;
+						deferredLen  = sDeferredAddLen;
+						sDeferredAddPending = false;
+						LightLock_Unlock(&sAudioAsyncLock);
+
+						if (deferredOut != nullptr)
+							deferredOut->AddBuffer(g_pu8RamBase + deferredAddr, deferredLen);
+						continue;
+					}
+					sDeferredAddActive = false;
+					sAudioTaskBusy.store(false, std::memory_order_release);
+					LightEvent_Signal(&sAudioDoneEvent);
+					LightLock_Unlock(&sAudioAsyncLock);
+					break;
+				}
 			}
 		}
 	}
@@ -180,6 +232,7 @@ namespace
 		{
 			LightEvent_Init(&sAudioStartEvent, RESET_ONESHOT);
 			LightEvent_Init(&sAudioDoneEvent, RESET_STICKY);
+			LightLock_Init(&sAudioAsyncLock);
 			LightEvent_Signal(&sAudioDoneEvent);
 			sAudioEventsInit = true;
 		}
@@ -191,6 +244,8 @@ namespace
 
 		sAudioWorkerQuit.store(false, std::memory_order_release);
 		sAudioTaskBusy.store(false, std::memory_order_release);
+		sDeferredAddPending = false;
+		sDeferredAddActive  = false;
 
 		s32 prio = 0x30;
 		svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
@@ -284,6 +339,7 @@ void	CAudioPluginCTR::DacrateChanged( int SystemType )
 //	printf( "DacrateChanged( %s )\n", (SystemType == ST_NTSC) ? "NTSC" : "PAL" );
 	if (mAudioOutput == nullptr)
 		return;
+	WaitForAsyncAudioTask();
 	u32 type = (u32)((SystemType == ST_NTSC) ? VI_NTSC_CLOCK : VI_PAL_CLOCK);
 	u32 dacrate = Memory_AI_GetRegister(AI_DACRATE_REG);
 	u32	frequency = type / (dacrate + 1);
@@ -314,13 +370,48 @@ void	CAudioPluginCTR::LenChanged()
 		if (length > gRamSize - address)
 			length = gRamSize - address;
 
-		// Only wait for Core 1 if the AI DMA buffer being queued actually overlaps
-		// the RDRAM buffer currently being synthesized by Core 1 (double-buffered
-		// audio like Mario Kart 64 queues the previous frame's completed buffer).
-		if (sAudioTaskBusy.load(std::memory_order_acquire) &&
-			OverlapsAsyncAudioOutput(address, length))
+		if (sAudioWorkerThread != nullptr && sAudioTaskBusy.load(std::memory_order_acquire))
 		{
-			WaitForAsyncAudioTask();
+			if (mAudioOutput->IsPlaying())
+			{
+				bool deferred = false;
+				bool mustWait = false;
+				LightLock_Lock(&sAudioAsyncLock);
+				if (sAudioTaskBusy.load(std::memory_order_relaxed))
+				{
+					if (sDeferredAddActive)
+					{
+						// Preserve strict FIFO audio ordering if a previous deferred AddBuffer is still running.
+						mustWait = true;
+					}
+					else if (OverlapsAsyncAudioOutput(address, length))
+					{
+						// Hand off overlapping AddBuffer to Core 1/2 so Core 0 never stalls on single-buffered audio.
+						sDeferredAddOut     = mAudioOutput;
+						sDeferredAddAddr    = address;
+						sDeferredAddLen     = length;
+						sDeferredAddPending = true;
+						sDeferredAddActive  = true;
+						deferred            = true;
+					}
+				}
+				LightLock_Unlock(&sAudioAsyncLock);
+
+				if (deferred)
+				{
+					PerfCTR::AddAud0(svcGetSystemTick() - t0);
+					return;
+				}
+				if (mustWait)
+				{
+					WaitForAsyncAudioTask();
+				}
+			}
+			else if (OverlapsAsyncAudioOutput(address, length))
+			{
+				// First buffer initializes ndsp on Core 0.
+				WaitForAsyncAudioTask();
+			}
 		}
 
 		mAudioOutput->AddBuffer( g_pu8RamBase + address, length );

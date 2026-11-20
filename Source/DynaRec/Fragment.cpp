@@ -1011,8 +1011,11 @@ void CFragment::Assemble( CCodeBufferManager * p_manager, CCodeLabel function_pt
 
 	CJumpLocation jump = p_generator->ExecuteNativeFunction(function_ptr, true);
 	p_generator->GenerateIndirectExitCode(100, mpIndirectExitMap);
-	AssemblyUtils::PatchJumpLong(jump, p_generator->GetCurrentLocation());
-	p_generator->GenerateEretExitCode(100, mpIndirectExitMap);
+	if (jump.IsSet())
+	{
+		AssemblyUtils::PatchJumpLong(jump, p_generator->GetCurrentLocation());
+		p_generator->GenerateEretExitCode(100, mpIndirectExitMap);
+	}
 
 	p_generator->Finalise( HandleException, exception_handler_jumps, exception_handler_snapshots );
 	mFragmentFunctionLength = p_manager->FinaliseCurrentBlock();

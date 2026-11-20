@@ -96,7 +96,13 @@ void Audio_Reset()
 //*****************************************************************************
 inline void Audio_Ucode_Detect(OSTask * pTask)
 {
-	u8* p_base = g_pu8RamBase + (u32)pTask->t.ucode_data;
+	u32 data_addr = (u32)pTask->t.ucode_data & 0x007FFFFFu;
+	if (data_addr + 0x34u > gRamSize)
+	{
+		ABI = ABI3;
+		return;
+	}
+	u8* p_base = g_pu8RamBase + data_addr;
 	if (*(u32*)(p_base + 0) != 0x01)
 	{
 		if (*(u32*)(p_base + 0x10) == 0x00000001)

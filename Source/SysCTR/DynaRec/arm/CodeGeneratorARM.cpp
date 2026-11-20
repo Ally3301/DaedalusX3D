@@ -21,7 +21,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "stdafx.h"
 #include "CodeGeneratorARM.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 #include "Config/ConfigOptions.h"
 #include "Core/CPU.h"
@@ -39,7 +41,40 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "SysCTR/Utility/PerfProfilerCTR.h"
 #endif
 
+#undef offsetof
 #define offsetof(type, m) ((size_t)&(((type *)0)->m))
+
+#ifdef DAEDALUS_ENABLE_OS_HOOKS
+u32 Patch_osVirtualToPhysical_Mario();
+u32 Patch_osVirtualToPhysical_Rugrats();
+u32 Patch_sqrtf();
+u32 Patch___ull_rshift();
+u32 Patch___osDisableInt_Mario();
+u32 Patch___osDisableInt_Zelda();
+u32 Patch___osRestoreInt();
+u32 Patch_osGetCount();
+#endif
+
+static u64 CTR_TruncL_S_Slow(u32 fbits)
+{
+	f32 x;
+	std::memcpy(&x, &fbits, sizeof(x));
+	return static_cast<u64>(static_cast<s64>(truncf(x)));
+}
+
+static u32 CTR_CvtS_L_Slow(u32 lo, u32 hi)
+{
+	const s64 v = static_cast<s64>((static_cast<u64>(hi) << 32) | static_cast<u64>(lo));
+	const f32 f = static_cast<f32>(v);
+	u32 out;
+	std::memcpy(&out, &f, sizeof(out));
+	return out;
+}
+
+static void CTR_AddCheckInterrupts()
+{
+	gCPUState.AddJob( CPU_CHECK_INTERRUPTS );
+}
 
 using namespace AssemblyUtils;
 
@@ -1226,7 +1261,7 @@ void CCodeGeneratorARM::GenerateExceptionHander( ExceptionHandlerFn p_exception_
 
 	RET();
 
-	for (int i = 0; i < exception_handler_jumps.size(); i++)
+	for (size_t i = 0; i < exception_handler_jumps.size(); i++)
 	{
 		CJumpLocation	jump(exception_handler_jumps[i]);
 		InsertLiteralPool(false);
@@ -1408,6 +1443,8 @@ CJumpLocation	CCodeGeneratorARM::GenerateOpCode( const STraceEntry& ti, bool bra
 		case OP_SH:		handled = GenerateSH(address, branch_delay_slot, rt, base, s16(op_code.immediate));   exception = !handled; break;
 		case OP_SB:		handled = GenerateSB(address, branch_delay_slot,rt, base, s16(op_code.immediate));   exception = !handled; break;
 		case OP_SD:		handled = GenerateSD(address, branch_delay_slot,rt, base, s16(op_code.immediate));   exception = !handled; break;
+		case OP_SWL:	handled = GenerateSWL(op_code, rt, base, s16(op_code.immediate)); break;
+		case OP_SWR:	handled = GenerateSWR(op_code, rt, base, s16(op_code.immediate)); break;
 		case OP_SWC1:	handled = GenerateSWC1(address, branch_delay_slot,ft, base, s16(op_code.immediate)); exception = !handled; break;
 		case OP_SDC1:	handled = GenerateSDC1(address, branch_delay_slot,ft, base, s16(op_code.immediate)); exception = !handled; break;
 
@@ -1415,6 +1452,8 @@ CJumpLocation	CCodeGeneratorARM::GenerateOpCode( const STraceEntry& ti, bool bra
 		case OP_SLTI:	GenerateSLTI( rt, rs, s16( op_code.immediate ), false ); handled = true; break;
 
 		case OP_LW:		handled = GenerateLW(address, branch_delay_slot,rt, base, s16(op_code.immediate));   exception = !handled; break;
+		case OP_LWL:	handled = GenerateLWL(op_code, rt, base, s16(op_code.immediate)); break;
+		case OP_LWR:	handled = GenerateLWR(op_code, rt, base, s16(op_code.immediate)); break;
 		case OP_LH:		handled = GenerateLH(address, branch_delay_slot,rt, base, s16(op_code.immediate));   exception = !handled; break;
 		case OP_LHU: 	handled = GenerateLHU(address, branch_delay_slot,rt, base, s16(op_code.immediate));  exception = !handled; break;
 		case OP_LB: 	handled = GenerateLB(address, branch_delay_slot,rt, base, s16(op_code.immediate));   exception = !handled; break;
@@ -1501,6 +1540,7 @@ CJumpLocation	CCodeGeneratorARM::GenerateOpCode( const STraceEntry& ti, bool bra
 			switch( op_code.cop0_op )
 			{
 			case Cop0Op_MFC0:	GenerateMFC0( rt, op_code.fs ); handled = true; break;
+			case Cop0Op_MTC0:	GenerateMTC0( op_code.fs, rt ); handled = true; break;
 			default:
 				break;
 			}
@@ -1509,7 +1549,9 @@ CJumpLocation	CCodeGeneratorARM::GenerateOpCode( const STraceEntry& ti, bool bra
 			switch( op_code.cop1_op )
 			{
 				case Cop1Op_MFC1:	GenerateMFC1( rt, op_code.fs ); handled = true; break;
+				case Cop1Op_DMFC1:	GenerateDMFC1( rt, op_code.fs ); handled = true; break;
 				case Cop1Op_MTC1:	GenerateMTC1( op_code.fs, rt ); handled = true; break;
+				case Cop1Op_DMTC1:	GenerateDMTC1( op_code.fs, rt ); handled = true; break;
 
 				case Cop1Op_CFC1:	GenerateCFC1( rt, op_code.fs ); handled = true; break;
 				case Cop1Op_CTC1:	GenerateCTC1( op_code.fs, rt ); handled = true; break;
@@ -1529,6 +1571,13 @@ CJumpLocation	CCodeGeneratorARM::GenerateOpCode( const STraceEntry& ti, bool bra
 					{
 						case Cop1OpFunc_CVT_S:	GenerateCVT_S_W( op_code.fd, op_code.fs ); handled = true; break;
 						case Cop1OpFunc_CVT_D:	GenerateCVT_D_W( op_code.fd, op_code.fs ); handled = true; break;
+					}
+					break;
+
+				case Cop1Op_LInstr:
+					switch( op_code.cop1_funct )
+					{
+						case Cop1OpFunc_CVT_S:	GenerateCVT_S_L( op_code.fd, op_code.fs ); handled = true; break;
 					}
 					break;
 
@@ -1583,6 +1632,7 @@ CJumpLocation	CCodeGeneratorARM::GenerateOpCode( const STraceEntry& ti, bool bra
 						case Cop1OpFunc_NEG:		GenerateNEG_S( op_code.fd, op_code.fs ); handled = true; break;
 						
 						case Cop1OpFunc_TRUNC_W:	GenerateTRUNC_W_S( op_code.fd, op_code.fs ); handled = true; break;
+						case Cop1OpFunc_TRUNC_L:	GenerateTRUNC_L_S( op_code.fd, op_code.fs ); handled = true; break;
 						case Cop1OpFunc_ROUND_W:
 						case Cop1OpFunc_CVT_W:		GenerateCVT_W_S( op_code.fd, op_code.fs ); handled = true; break;
 						case Cop1OpFunc_CVT_D:		GenerateCVT_D_S( op_code.fd, op_code.fs ); handled = true; break;
@@ -1710,6 +1760,131 @@ void	CCodeGeneratorARM::GenerateGenericR4300( OpCode op_code, CPU_Instruction p_
 CJumpLocation CCodeGeneratorARM::ExecuteNativeFunction( CCodeLabel speed_hack, bool check_return )
 {
 	FlushAllRegisters(mRegisterCache, true);
+#ifdef DAEDALUS_ENABLE_OS_HOOKS
+	if (check_return)
+	{
+		const void * const target = speed_hack.GetTarget();
+		if (target == reinterpret_cast<const void *>(&Patch_sqrtf))
+		{
+			VLDR(ArmVfpReg_S0, ArmReg_R12, offsetof(SCPUState, FPU[12]._f32));
+			VSQRT(ArmVfpReg_S0, ArmVfpReg_S0);
+			VSTR(ArmVfpReg_S0, ArmReg_R12, offsetof(SCPUState, FPU[0]._f32));
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_RA]._u32_0));
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, TargetPC));
+			return CJumpLocation(nullptr);
+		}
+		if (target == reinterpret_cast<const void *>(&Patch_osVirtualToPhysical_Mario) ||
+			target == reinterpret_cast<const void *>(&Patch_osVirtualToPhysical_Rugrats))
+		{
+			// Fast inline KSEG0/KSEG1 mask: ((addr - 0x80000000) < 0x40000000) ? (addr & 0x1FFFFFFF) : slow TLB.
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_A0]._u32_0));
+			SUB_IMM(ArmReg_R1, ArmReg_R0, 0x02, 0x01); // r1 = addr - 0x80000000
+			CMP_IMM_U32(ArmReg_R1, 0x40000000u, ArmReg_R2);
+			CJumpLocation tlb_slow = BX_IMM(CCodeLabel(nullptr), CS);
+
+			BIC_IMM(ArmReg_R0, ArmReg_R0, 0xE0000000u, ArmReg_R2);
+			MOV_IMM(ArmReg_R1, 0);
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V0]._u32_0));
+			STR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V0]._u32_1));
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_RA]._u32_0));
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, TargetPC));
+
+			if (IsBufferA())
+			{
+				CCodeLabel done = GetAssemblyBuffer()->GetLabel();
+				SetBufferB();
+				PatchJumpLong(tlb_slow, GetAssemblyBuffer()->GetLabel());
+				CALL(speed_hack);
+				GenerateBranchAlways(done);
+				SetBufferA();
+			}
+			else
+			{
+				CJumpLocation skip = BX_IMM(CCodeLabel(nullptr), AL);
+				PatchJumpLong(tlb_slow, GetAssemblyBuffer()->GetLabel());
+				CALL(speed_hack);
+				PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+			}
+			return CJumpLocation(nullptr);
+		}
+		if (target == reinterpret_cast<const void *>(&Patch___ull_rshift))
+		{
+			// Inline 64-bit unsigned logical right shift:
+			// op1 = (a0 << 32) | a1, op2 = a3, v0 = (u64)(res >> 32), v1 = (u64)(res & 0xFFFFFFFF).
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_A0]._u32_0)); // hi
+			LDR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_A1]._u32_0)); // lo
+			LDR(ArmReg_R2, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_A3]._u32_0)); // sh
+			RSB_IMM(ArmReg_R3, ArmReg_R2, 32);
+			MOV_LSR(ArmReg_R1, ArmReg_R1, ArmReg_R2);
+			ORR_LSL_REG(ArmReg_R1, ArmReg_R1, ArmReg_R0, ArmReg_R3);
+			SUBS_IMM(ArmReg_R3, ArmReg_R2, 32);
+			ORR_LSR_REG(ArmReg_R1, ArmReg_R1, ArmReg_R0, ArmReg_R3, PL);
+			MOV_LSR(ArmReg_R0, ArmReg_R0, ArmReg_R2);
+			MOV_IMM(ArmReg_R3, 0);
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V0]._u32_0));
+			STR(ArmReg_R3, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V0]._u32_1));
+			STR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V1]._u32_0));
+			STR(ArmReg_R3, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V1]._u32_1));
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_RA]._u32_0));
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, TargetPC));
+			return CJumpLocation(nullptr);
+		}
+		if (target == reinterpret_cast<const void *>(&Patch___osDisableInt_Mario) ||
+			target == reinterpret_cast<const void *>(&Patch___osDisableInt_Zelda))
+		{
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPUControl[C0_SR]._u32));
+			BIC_IMM(ArmReg_R1, ArmReg_R0, SR_IE, ArmReg_R2);
+			STR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, CPUControl[C0_SR]._u32));
+			AND_IMM(ArmReg_R0, ArmReg_R0, SR_IE);
+			MOV_IMM(ArmReg_R1, 0);
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V0]._u32_0));
+			STR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V0]._u32_1));
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_RA]._u32_0));
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, TargetPC));
+			return CJumpLocation(nullptr);
+		}
+		if (target == reinterpret_cast<const void *>(&Patch___osRestoreInt))
+		{
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPUControl[C0_SR]._u32));
+			LDR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_A0]._u32_0));
+			ORR(ArmReg_R0, ArmReg_R0, ArmReg_R1);
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPUControl[C0_SR]._u32));
+			LDR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, CPUControl[C0_CAUSE]._u32));
+			AND(ArmReg_R0, ArmReg_R0, ArmReg_R1);
+			TST_IMM(ArmReg_R0, 0xFF, 0x0C); // CAUSE_IPMASK = 0x0000FF00
+			CJumpLocation pending_irq = BX_IMM(CCodeLabel(nullptr), NE);
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_RA]._u32_0));
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, TargetPC));
+			if (IsBufferA())
+			{
+				CCodeLabel done = GetAssemblyBuffer()->GetLabel();
+				SetBufferB();
+				PatchJumpLong(pending_irq, GetAssemblyBuffer()->GetLabel());
+				CALL(speed_hack);
+				GenerateBranchAlways(done);
+				SetBufferA();
+			}
+			else
+			{
+				CJumpLocation skip = BX_IMM(CCodeLabel(nullptr), AL);
+				PatchJumpLong(pending_irq, GetAssemblyBuffer()->GetLabel());
+				CALL(speed_hack);
+				PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+			}
+			return CJumpLocation(nullptr);
+		}
+		if (target == reinterpret_cast<const void *>(&Patch_osGetCount))
+		{
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPUControl[C0_COUNT]._u32));
+			MOV_IMM(ArmReg_R1, 0);
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V0]._u32_0));
+			STR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_V0]._u32_1));
+			LDR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, CPU[N64Reg_RA]._u32_0));
+			STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, TargetPC));
+			return CJumpLocation(nullptr);
+		}
+	}
+#endif
 #ifdef DAEDALUS_CTR_XRAY
 	MOV32(ArmReg_R0, speed_hack.GetTargetU32());
 	CALL( CCodeLabel( reinterpret_cast<const void *>(&PerfCTR_CallOshle) ) );
@@ -1760,6 +1935,13 @@ inline void CCodeGeneratorARM::GenerateLoad( u32 current_pc, EArmReg arm_dest, E
 	if ((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad))
 	{
 		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+		if (bits == 32 && twiddle == 0 && offset != 0 && offset >= -4095 && offset <= 4095)
+		{
+			// 2 instructions, ZERO literal pool load for any ±4095 offset (e.g. large stack frames/structs).
+			ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+			LDR(arm_dest, ArmReg_R0, offset);
+			return;
+		}
 		EArmReg load_reg = reg_base;
 		if (offset != 0)
 		{
@@ -1872,6 +2054,254 @@ bool CCodeGeneratorARM::GenerateLW( u32 address, bool set_branch_delay, EN64Reg 
 	return true;
 }
 
+bool CCodeGeneratorARM::GenerateLWL( OpCode op_code, EN64Reg rt, EN64Reg base, s16 offset )
+{
+	if (rt == N64Reg_R0)
+		return true;
+
+	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+	if (offset != 0)
+		ADD_IMM(ArmReg_R0, reg_base, offset, ArmReg_R1);
+	else if (reg_base != ArmReg_R0)
+		MOV(ArmReg_R0, reg_base);
+
+	CMP(ArmReg_R0, gMemUpperBoundReg);
+	CJumpLocation slow_loc = BX_IMM(CCodeLabel(nullptr), GE);
+	CN64RegisterCacheARM pre_rt_regs(mRegisterCache);
+
+	// Fast KSEG0 RDRAM unaligned left load:
+	// shift = (addr & 3) << 3; mask = ~0u << shift; rt = (rt & ~mask) | (mem << shift)
+	BIC_IMM(ArmReg_R1, ArmReg_R0, 3u, ArmReg_R2);
+	LDR_REG(ArmReg_R1, ArmReg_R1, gMemoryBaseReg);
+	AND_IMM(ArmReg_R2, ArmReg_R0, 3);
+	MOV_LSL_IMM(ArmReg_R2, ArmReg_R2, 3);
+	MOV32(ArmReg_R3, 0xFFFFFFFFu);
+	MOV_LSL(ArmReg_R3, ArmReg_R3, ArmReg_R2);
+
+	EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+	BIC(reg_rt, reg_rt, ArmReg_R3);
+	ORR_LSL_REG(reg_rt, reg_rt, ArmReg_R1, ArmReg_R2);
+	UpdateRegister(rt, reg_rt, URO_HI_SIGN_EXTEND);
+
+	CN64RegisterCacheARM post_fast_regs(mRegisterCache);
+	CJumpLocation skip;
+	CCodeLabel current;
+	if (IsBufferB())
+	{
+		skip = GenerateBranchAlways(CCodeLabel(nullptr));
+	}
+	else
+	{
+		current = GetAssemblyBuffer()->GetLabel();
+		SetBufferB();
+	}
+
+	PatchJumpLong(slow_loc, GetAssemblyBuffer()->GetLabel());
+	mRegisterCache = pre_rt_regs;
+	FlushAllRegisters(mRegisterCache, true);
+	MOV32(ArmReg_R0, op_code._u32);
+	CALL(CCodeLabel(reinterpret_cast<const void *>(R4300_GetInstructionHandler(op_code))));
+	RestoreAllRegisters(mRegisterCache, post_fast_regs);
+	mRegisterCache = post_fast_regs;
+
+	if (current.IsSet())
+	{
+		GenerateBranchAlways(current);
+		SetBufferA();
+	}
+	else
+	{
+		PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+	}
+	return true;
+}
+
+bool CCodeGeneratorARM::GenerateLWR( OpCode op_code, EN64Reg rt, EN64Reg base, s16 offset )
+{
+	if (rt == N64Reg_R0)
+		return true;
+
+	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+	if (offset != 0)
+		ADD_IMM(ArmReg_R0, reg_base, offset, ArmReg_R1);
+	else if (reg_base != ArmReg_R0)
+		MOV(ArmReg_R0, reg_base);
+
+	CMP(ArmReg_R0, gMemUpperBoundReg);
+	CJumpLocation slow_loc = BX_IMM(CCodeLabel(nullptr), GE);
+	CN64RegisterCacheARM pre_rt_regs(mRegisterCache);
+
+	// Fast KSEG0 RDRAM unaligned right load:
+	// lshift = ((addr & 3) + 1) << 3; mask = ~0u << lshift; rshift = (~addr & 3) << 3;
+	// rt = (rt & mask) | (mem >> rshift)
+	BIC_IMM(ArmReg_R1, ArmReg_R0, 3u, ArmReg_R2);
+	LDR_REG(ArmReg_R1, ArmReg_R1, gMemoryBaseReg);
+	AND_IMM(ArmReg_R2, ArmReg_R0, 3);
+	ADD_IMM(ArmReg_R3, ArmReg_R2, 1);
+	MOV_LSL_IMM(ArmReg_R3, ArmReg_R3, 3);
+	MOV32(ArmReg_R0, 0xFFFFFFFFu);
+	MOV_LSL(ArmReg_R0, ArmReg_R0, ArmReg_R3);
+	RSB_IMM(ArmReg_R2, ArmReg_R2, 3);
+	MOV_LSL_IMM(ArmReg_R2, ArmReg_R2, 3);
+	MOV_LSR(ArmReg_R1, ArmReg_R1, ArmReg_R2);
+
+	EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R2);
+	AND(reg_rt, reg_rt, ArmReg_R0);
+	ORR(reg_rt, reg_rt, ArmReg_R1);
+	UpdateRegister(rt, reg_rt, URO_HI_SIGN_EXTEND);
+
+	CN64RegisterCacheARM post_fast_regs(mRegisterCache);
+	CJumpLocation skip;
+	CCodeLabel current;
+	if (IsBufferB())
+	{
+		skip = GenerateBranchAlways(CCodeLabel(nullptr));
+	}
+	else
+	{
+		current = GetAssemblyBuffer()->GetLabel();
+		SetBufferB();
+	}
+
+	PatchJumpLong(slow_loc, GetAssemblyBuffer()->GetLabel());
+	mRegisterCache = pre_rt_regs;
+	FlushAllRegisters(mRegisterCache, true);
+	MOV32(ArmReg_R0, op_code._u32);
+	CALL(CCodeLabel(reinterpret_cast<const void *>(R4300_GetInstructionHandler(op_code))));
+	RestoreAllRegisters(mRegisterCache, post_fast_regs);
+	mRegisterCache = post_fast_regs;
+
+	if (current.IsSet())
+	{
+		GenerateBranchAlways(current);
+		SetBufferA();
+	}
+	else
+	{
+		PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+	}
+	return true;
+}
+
+bool CCodeGeneratorARM::GenerateSWL( OpCode op_code, EN64Reg rt, EN64Reg base, s16 offset )
+{
+	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+	if (offset != 0)
+		ADD_IMM(ArmReg_R0, reg_base, offset, ArmReg_R1);
+	else if (reg_base != ArmReg_R0)
+		MOV(ArmReg_R0, reg_base);
+
+	CMP(ArmReg_R0, gMemUpperBoundReg);
+	CJumpLocation slow_loc = BX_IMM(CCodeLabel(nullptr), GE);
+	CN64RegisterCacheARM pre_rt_regs(mRegisterCache);
+
+	// Fast KSEG0 RDRAM unaligned left store:
+	// shift = (addr & 3) << 3; mask = 0xFFFFFFFFu >> shift; mem = (mem & ~mask) | (rt >> shift)
+	BIC_IMM(ArmReg_R1, ArmReg_R0, 3u, ArmReg_R2);
+	LDR_REG(ArmReg_R3, ArmReg_R1, gMemoryBaseReg);
+	AND_IMM(ArmReg_R2, ArmReg_R0, 3);
+	MOV_LSL_IMM(ArmReg_R2, ArmReg_R2, 3);
+	MOV32(ArmReg_R0, 0xFFFFFFFFu);
+	MOV_LSR(ArmReg_R0, ArmReg_R0, ArmReg_R2);
+	BIC(ArmReg_R3, ArmReg_R3, ArmReg_R0);
+
+	EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+	ORR_LSR_REG(ArmReg_R3, ArmReg_R3, reg_rt, ArmReg_R2);
+	STR_REG(ArmReg_R3, ArmReg_R1, gMemoryBaseReg);
+
+	CN64RegisterCacheARM post_fast_regs(mRegisterCache);
+	CJumpLocation skip;
+	CCodeLabel current;
+	if (IsBufferB())
+	{
+		skip = GenerateBranchAlways(CCodeLabel(nullptr));
+	}
+	else
+	{
+		current = GetAssemblyBuffer()->GetLabel();
+		SetBufferB();
+	}
+
+	PatchJumpLong(slow_loc, GetAssemblyBuffer()->GetLabel());
+	mRegisterCache = pre_rt_regs;
+	FlushAllRegisters(mRegisterCache, true);
+	MOV32(ArmReg_R0, op_code._u32);
+	CALL(CCodeLabel(reinterpret_cast<const void *>(R4300_GetInstructionHandler(op_code))));
+	RestoreAllRegisters(mRegisterCache, post_fast_regs);
+	mRegisterCache = post_fast_regs;
+
+	if (current.IsSet())
+	{
+		GenerateBranchAlways(current);
+		SetBufferA();
+	}
+	else
+	{
+		PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+	}
+	return true;
+}
+
+bool CCodeGeneratorARM::GenerateSWR( OpCode op_code, EN64Reg rt, EN64Reg base, s16 offset )
+{
+	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+	if (offset != 0)
+		ADD_IMM(ArmReg_R0, reg_base, offset, ArmReg_R1);
+	else if (reg_base != ArmReg_R0)
+		MOV(ArmReg_R0, reg_base);
+
+	CMP(ArmReg_R0, gMemUpperBoundReg);
+	CJumpLocation slow_loc = BX_IMM(CCodeLabel(nullptr), GE);
+	CN64RegisterCacheARM pre_rt_regs(mRegisterCache);
+
+	// Fast KSEG0 RDRAM unaligned right store:
+	// lshift = (~addr & 3) << 3; mask = 0xFFFFFFFFu << lshift; mem = (mem & ~mask) | (rt << lshift)
+	BIC_IMM(ArmReg_R1, ArmReg_R0, 3u, ArmReg_R2);
+	LDR_REG(ArmReg_R3, ArmReg_R1, gMemoryBaseReg);
+	AND_IMM(ArmReg_R2, ArmReg_R0, 3);
+	RSB_IMM(ArmReg_R2, ArmReg_R2, 3);
+	MOV_LSL_IMM(ArmReg_R2, ArmReg_R2, 3);
+	MOV32(ArmReg_R0, 0xFFFFFFFFu);
+	MOV_LSL(ArmReg_R0, ArmReg_R0, ArmReg_R2);
+	BIC(ArmReg_R3, ArmReg_R3, ArmReg_R0);
+
+	EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+	ORR_LSL_REG(ArmReg_R3, ArmReg_R3, reg_rt, ArmReg_R2);
+	STR_REG(ArmReg_R3, ArmReg_R1, gMemoryBaseReg);
+
+	CN64RegisterCacheARM post_fast_regs(mRegisterCache);
+	CJumpLocation skip;
+	CCodeLabel current;
+	if (IsBufferB())
+	{
+		skip = GenerateBranchAlways(CCodeLabel(nullptr));
+	}
+	else
+	{
+		current = GetAssemblyBuffer()->GetLabel();
+		SetBufferB();
+	}
+
+	PatchJumpLong(slow_loc, GetAssemblyBuffer()->GetLabel());
+	mRegisterCache = pre_rt_regs;
+	FlushAllRegisters(mRegisterCache, true);
+	MOV32(ArmReg_R0, op_code._u32);
+	CALL(CCodeLabel(reinterpret_cast<const void *>(R4300_GetInstructionHandler(op_code))));
+	RestoreAllRegisters(mRegisterCache, post_fast_regs);
+	mRegisterCache = post_fast_regs;
+
+	if (current.IsSet())
+	{
+		GenerateBranchAlways(current);
+		SetBufferA();
+	}
+	else
+	{
+		PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+	}
+	return true;
+}
+
 //Load Double Word
 bool CCodeGeneratorARM::GenerateLD( u32 address, bool set_branch_delay, EN64Reg rt, EN64Reg base, s16 offset )
 {
@@ -1965,16 +2395,75 @@ bool CCodeGeneratorARM::GenerateLWC1( u32 address, bool set_branch_delay, u32 ft
 		return true;
 	}
 
-	GenerateLoad( address, ArmReg_R0, base, offset, 0, 32, false, set_branch_delay ? ReadBitsDirectBD_u32 : ReadBitsDirect_u32 );
-	
+	// Direct VFP VLDR on the bounds-checked RDRAM fast path too — eliminates ARM11's
+	// 8-12 cycle integer->VFP pipeline stall (VMOV sX, r0) on struct/entity float loads!
+	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+	EArmReg load_reg = reg_base;
+	if (offset != 0)
+	{
+		ADD_IMM(ArmReg_R0, reg_base, offset, ArmReg_R1);
+		load_reg = ArmReg_R0;
+	}
+	CMP(load_reg, gMemUpperBoundReg);
+	CJumpLocation loc = BX_IMM(CCodeLabel { NULL }, GE);
+	ADD(ArmReg_R0, load_reg, gMemoryBaseReg);
+	VLDR(arm_ft, ArmReg_R0, 0);
+
+	CJumpLocation skip;
+	CCodeLabel current;
+	if (IsBufferB())
+	{
+		skip = GenerateBranchAlways(CCodeLabel { NULL });
+	}
+	else
+	{
+		current = GetAssemblyBuffer()->GetLabel();
+		SetBufferB();
+	}
+	PatchJumpLong(loc, GetAssemblyBuffer()->GetLabel());
+
+	CN64RegisterCacheARM current_regs(mRegisterCache);
+	FlushAllRegisters(mRegisterCache, true);
+	if (load_reg != ArmReg_R0)
+		MOV(ArmReg_R0, load_reg);
+	MOV32(ArmReg_R1, address);
+	MOV32(ArmReg_R3, (u32)(set_branch_delay ? ReadBitsDirectBD_u32 : ReadBitsDirect_u32));
+	BLX(ArmReg_R3);
+	RestoreAllRegisters(mRegisterCache, current_regs);
 	VMOV_S(arm_ft, ArmReg_R0);
-	
+	mRegisterCache = current_regs;
+
+	if (current.IsSet())
+	{
+		GenerateBranchAlways(current);
+		SetBufferA();
+	}
+	else
+	{
+		PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+	}
+
 	UpdateFloatRegister(EN64FloatReg(ft));
 	return true;
 }
 
 bool CCodeGeneratorARM::GenerateLDC1( u32 address, bool set_branch_delay, u32 ft, EN64Reg base, s16 offset )
 {
+	if (mRegisterCache.IsKnownValue(base, 0))
+	{
+		const u32 eff_addr = mRegisterCache.GetKnownValue(base, 0)._u32 + static_cast<s32>(offset);
+		if ((eff_addr - 0x80000000u) + 4u < gRamSize && (eff_addr & 3u) == 0)
+		{
+			MOV32(ArmReg_R0, eff_addr);
+			ADD(ArmReg_R0, ArmReg_R0, gMemoryBaseReg);
+			VLDR(EArmVfpReg(ft + 1), ArmReg_R0, 0);
+			VLDR(EArmVfpReg(ft), ArmReg_R0, 4);
+			UpdateFloatRegister(EN64FloatReg(ft + 1));
+			UpdateFloatRegister(EN64FloatReg(ft));
+			return true;
+		}
+	}
+
 	if (((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad)) &&
 		(offset & 3) == 0 && offset >= -1016 && offset <= 1016)
 	{
@@ -1987,14 +2476,64 @@ bool CCodeGeneratorARM::GenerateLDC1( u32 address, bool set_branch_delay, u32 ft
 		return true;
 	}
 
-	EArmVfpReg arm_ft = EArmVfpReg(ft+1);
-	GenerateLoad(address, ArmReg_R0, base, offset, 0, 32, false, set_branch_delay ? ReadBitsDirectBD_u32 : ReadBitsDirect_u32 );
-	VMOV_S(arm_ft, ArmReg_R0);
-	UpdateFloatRegister(EN64FloatReg(ft+1));
+	// Single bounds-checked direct VLDR pair (1 check instead of 2, zero VMOV stalls!).
+	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+	EArmReg load_reg = reg_base;
+	if (offset != 0)
+	{
+		ADD_IMM(ArmReg_R0, reg_base, offset, ArmReg_R1);
+		load_reg = ArmReg_R0;
+	}
+	CMP(load_reg, gMemUpperBoundReg);
+	CJumpLocation loc = BX_IMM(CCodeLabel { NULL }, GE);
+	ADD(ArmReg_R0, load_reg, gMemoryBaseReg);
+	VLDR(EArmVfpReg(ft + 1), ArmReg_R0, 0);
+	VLDR(EArmVfpReg(ft), ArmReg_R0, 4);
 
-	arm_ft = EArmVfpReg(ft);
-	GenerateLoad( address, ArmReg_R0, base, offset + 4, 0, 32, false, set_branch_delay ? ReadBitsDirectBD_u32 : ReadBitsDirect_u32 );
-	VMOV_S(arm_ft, ArmReg_R0);
+	CJumpLocation skip;
+	CCodeLabel current;
+	if (IsBufferB())
+	{
+		skip = GenerateBranchAlways(CCodeLabel { NULL });
+	}
+	else
+	{
+		current = GetAssemblyBuffer()->GetLabel();
+		SetBufferB();
+	}
+	PatchJumpLong(loc, GetAssemblyBuffer()->GetLabel());
+
+	CN64RegisterCacheARM current_regs(mRegisterCache);
+	FlushAllRegisters(mRegisterCache, true);
+	if (load_reg != ArmReg_R0)
+		MOV(ArmReg_R0, load_reg);
+	SetVar(&gCPUState.Temp1._u32, ArmReg_R0);
+	MOV32(ArmReg_R1, address);
+	MOV32(ArmReg_R3, (u32)(set_branch_delay ? ReadBitsDirectBD_u32 : ReadBitsDirect_u32));
+	BLX(ArmReg_R3);
+	SetVar(&gCPUState.Temp2._u32, ArmReg_R0);
+	GetVar(ArmReg_R0, &gCPUState.Temp1._u32);
+	ADD_IMM(ArmReg_R0, ArmReg_R0, 4);
+	MOV32(ArmReg_R1, address);
+	MOV32(ArmReg_R3, (u32)(set_branch_delay ? ReadBitsDirectBD_u32 : ReadBitsDirect_u32));
+	BLX(ArmReg_R3);
+	RestoreAllRegisters(mRegisterCache, current_regs);
+	VMOV_S(EArmVfpReg(ft), ArmReg_R0);
+	GetVar(ArmReg_R0, &gCPUState.Temp2._u32);
+	VMOV_S(EArmVfpReg(ft + 1), ArmReg_R0);
+	mRegisterCache = current_regs;
+
+	if (current.IsSet())
+	{
+		GenerateBranchAlways(current);
+		SetBufferA();
+	}
+	else
+	{
+		PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+	}
+
+	UpdateFloatRegister(EN64FloatReg(ft + 1));
 	UpdateFloatRegister(EN64FloatReg(ft));
 	return true;
 }
@@ -2035,6 +2574,12 @@ inline void CCodeGeneratorARM::GenerateStore(u32 address, EArmReg arm_src, EN64R
 	if ((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad))
 	{
 		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+		if (bits == 32 && twiddle == 0 && offset != 0 && offset >= -4095 && offset <= 4095)
+		{
+			ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+			STR(arm_src, ArmReg_R0, offset);
+			return;
+		}
 		EArmReg store_reg = reg_base;
 
 		if (offset != 0)
@@ -2168,14 +2713,75 @@ bool CCodeGeneratorARM::GenerateSWC1( u32 address, bool set_branch_delay, u32 ft
 		return true;
 	}
 
+	// Direct VFP VSTR on the bounds-checked RDRAM fast path too — eliminates ARM11's
+	// 8-12 cycle VFP->integer pipeline stall (VMOV r1, sX) on struct/entity float stores!
+	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+	EArmReg store_reg = reg_base;
+	if (offset != 0)
+	{
+		ADD_IMM(ArmReg_R0, reg_base, offset, ArmReg_R2);
+		store_reg = ArmReg_R0;
+	}
+	CMP(store_reg, gMemUpperBoundReg);
+	CJumpLocation loc = BX_IMM(CCodeLabel { NULL }, GE);
+	ADD(ArmReg_R0, store_reg, gMemoryBaseReg);
+	VSTR(arm_ft, ArmReg_R0, 0);
+
+	CJumpLocation skip;
+	CCodeLabel current;
+	if (IsBufferB())
+	{
+		skip = GenerateBranchAlways(CCodeLabel { NULL });
+	}
+	else
+	{
+		current = GetAssemblyBuffer()->GetLabel();
+		SetBufferB();
+	}
+	PatchJumpLong(loc, GetAssemblyBuffer()->GetLabel());
+
+	if (store_reg != ArmReg_R0)
+		MOV(ArmReg_R0, store_reg);
 	VMOV_S(ArmReg_R1, arm_ft);
-	GenerateStore( address, ArmReg_R1, base, offset, 0, 32, set_branch_delay ? WriteBitsDirectBD_u32 : WriteBitsDirect_u32 );
+	MOV32(ArmReg_R2, address);
+	CN64RegisterCacheARM current_regs(mRegisterCache);
+	FlushAllRegisters(mRegisterCache, true);
+	MOV32(ArmReg_R3, (u32)(set_branch_delay ? WriteBitsDirectBD_u32 : WriteBitsDirect_u32));
+	BLX(ArmReg_R3);
+	RestoreAllRegisters(mRegisterCache, current_regs);
+	mRegisterCache = current_regs;
+
+	if (current.IsSet())
+	{
+		GenerateBranchAlways(current);
+		SetBufferA();
+	}
+	else
+	{
+		PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+	}
 	return true;
 }
 
 bool CCodeGeneratorARM::GenerateSDC1( u32 address, bool set_branch_delay, u32 ft, EN64Reg base, s16 offset )
 {
-	EArmVfpReg arm_ft = GetDoubleRegisterAndLoad(EN64FloatReg(ft));
+	// Load both 32-bit halves individually so odd FP register indices (e.g. sdc1 $f7 in Conker)
+	// work without ARM VFP dN/2 even-register misalignment or clobbering s(ft-1).
+	GetFloatRegisterAndLoad(EN64FloatReg(ft));
+	GetFloatRegisterAndLoad(EN64FloatReg(ft + 1));
+
+	if (mRegisterCache.IsKnownValue(base, 0))
+	{
+		const u32 eff_addr = mRegisterCache.GetKnownValue(base, 0)._u32 + static_cast<s32>(offset);
+		if ((eff_addr - 0x80000000u) + 4u < gRamSize && (eff_addr & 3u) == 0)
+		{
+			MOV32(ArmReg_R0, eff_addr);
+			ADD(ArmReg_R0, ArmReg_R0, gMemoryBaseReg);
+			VSTR(EArmVfpReg(ft + 1), ArmReg_R0, 0);
+			VSTR(EArmVfpReg(ft), ArmReg_R0, 4);
+			return true;
+		}
+	}
 
 	if (((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad)) &&
 		(offset & 3) == 0 && offset >= -1016 && offset <= 1016)
@@ -2186,12 +2792,62 @@ bool CCodeGeneratorARM::GenerateSDC1( u32 address, bool set_branch_delay, u32 ft
 		VSTR(EArmVfpReg(ft), ArmReg_R0, offset + 4);
 		return true;
 	}
-	
-	VMOV_H(ArmReg_R1, arm_ft);
-	GenerateStore( address, ArmReg_R1, base, offset, 0, 32, set_branch_delay ? WriteBitsDirectBD_u32 : WriteBitsDirect_u32);
 
-	VMOV_L(ArmReg_R1, arm_ft);
-	GenerateStore( address, ArmReg_R1, base, offset + 4, 0, 32, set_branch_delay ? WriteBitsDirectBD_u32 : WriteBitsDirect_u32 );
+	// Single bounds-checked direct VSTR pair (1 check instead of 2, zero VMOV stalls!).
+	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
+	EArmReg store_reg = reg_base;
+	if (offset != 0)
+	{
+		ADD_IMM(ArmReg_R0, reg_base, offset, ArmReg_R2);
+		store_reg = ArmReg_R0;
+	}
+	CMP(store_reg, gMemUpperBoundReg);
+	CJumpLocation loc = BX_IMM(CCodeLabel { NULL }, GE);
+	ADD(ArmReg_R0, store_reg, gMemoryBaseReg);
+	VSTR(EArmVfpReg(ft + 1), ArmReg_R0, 0);
+	VSTR(EArmVfpReg(ft), ArmReg_R0, 4);
+
+	CJumpLocation skip;
+	CCodeLabel current;
+	if (IsBufferB())
+	{
+		skip = GenerateBranchAlways(CCodeLabel { NULL });
+	}
+	else
+	{
+		current = GetAssemblyBuffer()->GetLabel();
+		SetBufferB();
+	}
+	PatchJumpLong(loc, GetAssemblyBuffer()->GetLabel());
+
+	if (store_reg != ArmReg_R0)
+		MOV(ArmReg_R0, store_reg);
+	SetVar(&gCPUState.Temp1._u32, ArmReg_R0);
+	VMOV_S(ArmReg_R1, EArmVfpReg(ft + 1));
+	MOV32(ArmReg_R2, address);
+	CN64RegisterCacheARM current_regs(mRegisterCache);
+	FlushAllRegisters(mRegisterCache, true);
+	MOV32(ArmReg_R3, (u32)(set_branch_delay ? WriteBitsDirectBD_u32 : WriteBitsDirect_u32));
+	BLX(ArmReg_R3);
+	GetVar(ArmReg_R0, &gCPUState.Temp1._u32);
+	ADD_IMM(ArmReg_R0, ArmReg_R0, 4);
+	GetFloatVar(EArmVfpReg(ft), &gCPUState.FPU[ft]._f32);
+	VMOV_S(ArmReg_R1, EArmVfpReg(ft));
+	MOV32(ArmReg_R2, address);
+	MOV32(ArmReg_R3, (u32)(set_branch_delay ? WriteBitsDirectBD_u32 : WriteBitsDirect_u32));
+	BLX(ArmReg_R3);
+	RestoreAllRegisters(mRegisterCache, current_regs);
+	mRegisterCache = current_regs;
+
+	if (current.IsSet())
+	{
+		GenerateBranchAlways(current);
+		SetBufferA();
+	}
+	else
+	{
+		PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+	}
 	return true;
 }
 
@@ -2306,6 +2962,9 @@ void CCodeGeneratorARM::GenerateADDIU( EN64Reg rt, EN64Reg rs, s16 immediate )
 
 void CCodeGeneratorARM::GenerateDADDIU( EN64Reg rt, EN64Reg rs, s16 immediate )
 {
+	if (rt == rs && mRegisterCache.IsHiSignExtended(rs))
+		FlushRegister(mRegisterCache, rs, 1, false);
+
 	EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R0);
 	EArmReg regt = GetRegisterNoLoadLo(rt, ArmReg_R0);
 	MOV32(ArmReg_R1, (u32)immediate);
@@ -2321,6 +2980,11 @@ void CCodeGeneratorARM::GenerateDADDIU( EN64Reg rt, EN64Reg rs, s16 immediate )
 
 void CCodeGeneratorARM::GenerateDADDU( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 {
+	if (rd == rs && mRegisterCache.IsHiSignExtended(rs))
+		FlushRegister(mRegisterCache, rs, 1, false);
+	if (rd == rt && mRegisterCache.IsHiSignExtended(rt))
+		FlushRegister(mRegisterCache, rt, 1, false);
+
 	EArmReg reg_lo_d = GetRegisterNoLoadLo(rd, ArmReg_R0);
 	EArmReg reg_lo_s = GetRegisterAndLoadLo(rs, ArmReg_R1);
 	EArmReg reg_lo_t = GetRegisterAndLoadLo(rt, ArmReg_R0);
@@ -2339,6 +3003,11 @@ void CCodeGeneratorARM::GenerateDADDU( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 
 void CCodeGeneratorARM::GenerateDSUBU( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 {
+	if (rd == rs && mRegisterCache.IsHiSignExtended(rs))
+		FlushRegister(mRegisterCache, rs, 1, false);
+	if (rd == rt && mRegisterCache.IsHiSignExtended(rt))
+		FlushRegister(mRegisterCache, rt, 1, false);
+
 	EArmReg reg_lo_d = GetRegisterNoLoadLo(rd, ArmReg_R0);
 	EArmReg reg_lo_s = GetRegisterAndLoadLo(rs, ArmReg_R1);
 	EArmReg reg_lo_t = GetRegisterAndLoadLo(rt, ArmReg_R0);
@@ -2377,7 +3046,7 @@ void CCodeGeneratorARM::GenerateORI( EN64Reg rt, EN64Reg rs, u16 immediate )
 		// If we're oring again 0, then we're just setting a constant value
 		SetRegister64( rt, immediate, 0 );
 	}
-	else if(mRegisterCache.IsKnownValue( rs, 0 ))
+	else if(mRegisterCache.IsKnownValue( rs, 0 ) && mRegisterCache.IsKnownValue( rs, 1 ))
 	{
 		s32		known_value_lo( mRegisterCache.GetKnownValue( rs, 0 )._u32 | (u32)immediate );
 		s32		known_value_hi( mRegisterCache.GetKnownValue( rs, 1 )._u32 );
@@ -2386,10 +3055,27 @@ void CCodeGeneratorARM::GenerateORI( EN64Reg rt, EN64Reg rs, u16 immediate )
 	}
 	else
 	{
+		const bool rs_sext = IsSignExtended32(rs);
 		EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R0);
 		EArmReg regt = GetRegisterNoLoadLo(rt, ArmReg_R0);
 		ORR_IMM(regt, regs, immediate, ArmReg_R1);
-		StoreRegisterLo( rt, regt );
+		if (rs_sext)
+		{
+			// u16 immediate has bit 31 == 0, so OR preserves sign-extension of rs.
+			UpdateRegister(rt, regt, URO_HI_SIGN_EXTEND);
+		}
+		else
+		{
+			StoreRegisterLo( rt, regt );
+			if (rt != rs)
+			{
+				EArmReg regs_hi = GetRegisterAndLoadHi(rs, ArmReg_R0);
+				EArmReg regt_hi = GetRegisterNoLoadHi(rt, ArmReg_R0);
+				if (regt_hi != regs_hi)
+					MOV(regt_hi, regs_hi);
+				StoreRegisterHi(rt, regt_hi);
+			}
+		}
 	}
 }
 
@@ -2400,11 +3086,27 @@ void CCodeGeneratorARM::GenerateXORI( EN64Reg rt, EN64Reg rs, u16 immediate )
 		SetRegister64(rt, mRegisterCache.GetKnownValue(rs, 0)._u32 ^ (u32)immediate, mRegisterCache.GetKnownValue(rs, 1)._u32);
 		return;
 	}
+	const bool rs_sext = IsSignExtended32(rs);
 	EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R0);
 	EArmReg regt = GetRegisterNoLoadLo(rt, ArmReg_R0);
 
 	XOR_IMM(regt, regs, immediate, ArmReg_R1);
-	StoreRegisterLo( rt, regt);
+	if (rs_sext)
+	{
+		UpdateRegister(rt, regt, URO_HI_SIGN_EXTEND);
+	}
+	else
+	{
+		StoreRegisterLo( rt, regt );
+		if (rt != rs)
+		{
+			EArmReg regs_hi = GetRegisterAndLoadHi(rs, ArmReg_R0);
+			EArmReg regt_hi = GetRegisterNoLoadHi(rt, ArmReg_R0);
+			if (regt_hi != regs_hi)
+				MOV(regt_hi, regs_hi);
+			StoreRegisterHi(rt, regt_hi);
+		}
+	}
 }
 
 // Set on Less Than Immediate
@@ -2672,6 +3374,11 @@ void CCodeGeneratorARM::GenerateDSRA32( EN64Reg rd, EN64Reg rt, u32 sa )
 //Shift left logical variable
 void CCodeGeneratorARM::GenerateSLLV( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 {
+	if (mRegisterCache.IsKnownValue(rs, 0))
+	{
+		GenerateSLL(rd, rt, mRegisterCache.GetKnownValue(rs, 0)._u32 & 0x1Fu);
+		return;
+	}
 	EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
 	EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R1);
 	EArmReg regd = GetRegisterNoLoadLo(rd, ArmReg_R0);
@@ -2685,6 +3392,11 @@ void CCodeGeneratorARM::GenerateSLLV( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 //Shift right logical variable
 void CCodeGeneratorARM::GenerateSRLV( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 {
+	if (mRegisterCache.IsKnownValue(rs, 0))
+	{
+		GenerateSRL(rd, rt, mRegisterCache.GetKnownValue(rs, 0)._u32 & 0x1Fu);
+		return;
+	}
 	EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
 	EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R1);
 	EArmReg regd = GetRegisterNoLoadLo(rd, ArmReg_R0);
@@ -2698,6 +3410,11 @@ void CCodeGeneratorARM::GenerateSRLV( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 //Shift right arithmetic variable
 void CCodeGeneratorARM::GenerateSRAV( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 {
+	if (mRegisterCache.IsKnownValue(rs, 0))
+	{
+		GenerateSRA(rd, rt, mRegisterCache.GetKnownValue(rs, 0)._u32 & 0x1Fu);
+		return;
+	}
 	EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
 	EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R1);
 	EArmReg regd = GetRegisterNoLoadLo(rd, ArmReg_R0);
@@ -2710,7 +3427,51 @@ void CCodeGeneratorARM::GenerateSRAV( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 
 void CCodeGeneratorARM::GenerateOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 {
-	
+	if (mRegisterCache.IsKnownValue(rs, 0) && mRegisterCache.IsKnownValue(rt, 0) &&
+		mRegisterCache.IsKnownValue(rs, 1) && mRegisterCache.IsKnownValue(rt, 1))
+	{
+		SetRegister64(rd,
+			mRegisterCache.GetKnownValue(rs, 0)._u32 | mRegisterCache.GetKnownValue(rt, 0)._u32,
+			mRegisterCache.GetKnownValue(rs, 1)._u32 | mRegisterCache.GetKnownValue(rt, 1)._u32);
+		return;
+	}
+
+	// Fast 32-bit sign-extended path (covers MIPS MOVE = OR rd, rs, $r0 and most bitwise ops!):
+	// If both inputs are sign-extended 32-bit values, (a | b).hi == sign_ext(lo(a) | lo(b)).
+	if (IsSignExtended32(rs) && IsSignExtended32(rt))
+	{
+		if (rs == N64Reg_R0)
+		{
+			if (mRegisterCache.IsKnownValue(rt, 0))
+			{
+				SetRegister32s(rd, mRegisterCache.GetKnownValue(rt, 0)._s32);
+				return;
+			}
+			EArmReg reg_lo_d = GetRegisterNoLoadLo(rd, ArmReg_R0);
+			LoadRegisterLo(reg_lo_d, rt);
+			UpdateRegister(rd, reg_lo_d, URO_HI_SIGN_EXTEND);
+			return;
+		}
+		if (rt == N64Reg_R0)
+		{
+			if (mRegisterCache.IsKnownValue(rs, 0))
+			{
+				SetRegister32s(rd, mRegisterCache.GetKnownValue(rs, 0)._s32);
+				return;
+			}
+			EArmReg reg_lo_d = GetRegisterNoLoadLo(rd, ArmReg_R0);
+			LoadRegisterLo(reg_lo_d, rs);
+			UpdateRegister(rd, reg_lo_d, URO_HI_SIGN_EXTEND);
+			return;
+		}
+		EArmReg regt_lo = GetRegisterAndLoadLo(rt, ArmReg_R0);
+		EArmReg regs_lo = GetRegisterAndLoadLo(rs, ArmReg_R1);
+		EArmReg regd_lo = GetRegisterNoLoadLo(rd, ArmReg_R0);
+		ORR(regd_lo, regs_lo, regt_lo);
+		UpdateRegister(rd, regd_lo, URO_HI_SIGN_EXTEND);
+		return;
+	}
+
 	bool HiIsDone = false;
 
 	if (mRegisterCache.IsKnownValue(rs, 1) && mRegisterCache.IsKnownValue(rt, 1))
@@ -2725,7 +3486,7 @@ void CCodeGeneratorARM::GenerateOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 		HiIsDone = true;
 	}
 
-	if (mRegisterCache.IsKnownValue(rs, 0) && mRegisterCache.IsKnownValue(rt, 0))
+	if (mRegisterCache.IsKnownValue(rs, 0) && mRegisterCache.IsKnownValue(rt, 0) && HiIsDone)
 	{
 		SetRegister(rd, 0, mRegisterCache.GetKnownValue(rs, 0)._u32 | mRegisterCache.GetKnownValue(rt, 0)._u32);
 		return;
@@ -2733,23 +3494,15 @@ void CCodeGeneratorARM::GenerateOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 
 	if( rs == N64Reg_R0 )
 	{
-		// This doesn't seem to happen
-		/*if (mRegisterCache.IsKnownValue(rt, 1))
-		{
-			SetRegister(rd, 1, mRegisterCache.GetKnownValue(rt, 1)._u32 );
-			HiIsDone = true;
-		}
-		*/
-		if(mRegisterCache.IsKnownValue(rt, 0))
+		if (rd == rt)
+			return;
+		if(mRegisterCache.IsKnownValue(rt, 0) && mRegisterCache.IsKnownValue(rt, 1))
 		{
 			SetRegister64(rd,
 				mRegisterCache.GetKnownValue(rt, 0)._u32, mRegisterCache.GetKnownValue(rt, 1)._u32);
 			return;
 		}
 
-		// This case rarely seems to happen...
-		// As RS is zero, the OR is just a copy of RT to RD.
-		// Try to avoid loading into a temp register if the dest is cached
 		EArmReg reg_lo_d( GetRegisterNoLoadLo( rd, ArmReg_R0 ) );
 		LoadRegisterLo( reg_lo_d, rt );
 		StoreRegisterLo( rd, reg_lo_d );
@@ -2762,21 +3515,21 @@ void CCodeGeneratorARM::GenerateOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 	}
 	else if( rt == N64Reg_R0 )
 	{
+		if (rd == rs)
+			return;
 		if (mRegisterCache.IsKnownValue(rs, 1))
 		{
 			SetRegister(rd, 1, mRegisterCache.GetKnownValue(rs, 1)._u32 );
 			HiIsDone = true;
 		}
 
-		if(mRegisterCache.IsKnownValue(rs, 0))
+		if(mRegisterCache.IsKnownValue(rs, 0) && mRegisterCache.IsKnownValue(rs, 1))
 		{
 			SetRegister64(rd, mRegisterCache.GetKnownValue(rs, 0)._u32,
 				mRegisterCache.GetKnownValue(rs, 1)._u32);
 			return;
 		}
 
-		// As RT is zero, the OR is just a copy of RS to RD.
-		// Try to avoid loading into a temp register if the dest is cached
 		EArmReg reg_lo_d( GetRegisterNoLoadLo( rd, ArmReg_R0 ) );
 		LoadRegisterLo( reg_lo_d, rs );
 		StoreRegisterLo( rd, reg_lo_d );
@@ -2789,6 +3542,13 @@ void CCodeGeneratorARM::GenerateOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 	}
 	else
 	{
+		if (!HiIsDone)
+		{
+			if (rd == rs && mRegisterCache.IsHiSignExtended(rs))
+				FlushRegister(mRegisterCache, rs, 1, false);
+			if (rd == rt && mRegisterCache.IsHiSignExtended(rt))
+				FlushRegister(mRegisterCache, rt, 1, false);
+		}
 		EArmReg regt_lo = GetRegisterAndLoadLo(rt, ArmReg_R0);
 		EArmReg regs_lo = GetRegisterAndLoadLo(rs, ArmReg_R1);
 		EArmReg regd_lo = GetRegisterNoLoadLo(rd, ArmReg_R0);
@@ -2799,13 +3559,13 @@ void CCodeGeneratorARM::GenerateOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 
 		if(!HiIsDone)
 		{
-			if( mRegisterCache.IsKnownValue(rs, 1) & (mRegisterCache.GetKnownValue(rs, 1)._u32 == 0) )
+			if( mRegisterCache.IsKnownValue(rs, 1) && (mRegisterCache.GetKnownValue(rs, 1)._u32 == 0) )
 			{
 				EArmReg reg_hi_d( GetRegisterNoLoadHi( rd, ArmReg_R0 ) );
 				LoadRegisterHi( reg_hi_d, rt );
 				StoreRegisterHi( rd, reg_hi_d );
 			}
-			else if( mRegisterCache.IsKnownValue(rt, 1) & (mRegisterCache.GetKnownValue(rt, 1)._u32 == 0) )
+			else if( mRegisterCache.IsKnownValue(rt, 1) && (mRegisterCache.GetKnownValue(rt, 1)._u32 == 0) )
 			{
 				EArmReg reg_hi_d( GetRegisterNoLoadHi( rd, ArmReg_R0 ) );
 				LoadRegisterHi( reg_hi_d, rs );
@@ -2826,6 +3586,24 @@ void CCodeGeneratorARM::GenerateOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 
 void CCodeGeneratorARM::GenerateXOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 {
+	if (mRegisterCache.IsKnownValue(rs, 0) && mRegisterCache.IsKnownValue(rt, 0) &&
+		mRegisterCache.IsKnownValue(rs, 1) && mRegisterCache.IsKnownValue(rt, 1))
+	{
+		SetRegister64(rd,
+			mRegisterCache.GetKnownValue(rs, 0)._u32 ^ mRegisterCache.GetKnownValue(rt, 0)._u32,
+			mRegisterCache.GetKnownValue(rs, 1)._u32 ^ mRegisterCache.GetKnownValue(rt, 1)._u32);
+		return;
+	}
+	if (IsSignExtended32(rs) && IsSignExtended32(rt))
+	{
+		EArmReg regt_lo = GetRegisterAndLoadLo(rt, ArmReg_R0);
+		EArmReg regs_lo = GetRegisterAndLoadLo(rs, ArmReg_R1);
+		EArmReg regd_lo = GetRegisterNoLoadLo(rd, ArmReg_R0);
+		XOR(regd_lo, regs_lo, regt_lo);
+		UpdateRegister(rd, regd_lo, URO_HI_SIGN_EXTEND);
+		return;
+	}
+
 	bool hi_done = false;
 	if (mRegisterCache.IsKnownValue(rs, 1) && mRegisterCache.IsKnownValue(rt, 1))
 	{
@@ -2838,6 +3616,13 @@ void CCodeGeneratorARM::GenerateXOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 		return;
 	}
 
+	if (!hi_done)
+	{
+		if (rd == rs && mRegisterCache.IsHiSignExtended(rs))
+			FlushRegister(mRegisterCache, rs, 1, false);
+		if (rd == rt && mRegisterCache.IsHiSignExtended(rt))
+			FlushRegister(mRegisterCache, rt, 1, false);
+	}
 	EArmReg regt_lo = GetRegisterAndLoadLo(rt, ArmReg_R0);
 	EArmReg regs_lo = GetRegisterAndLoadLo(rs, ArmReg_R1);
 	EArmReg regd_lo = GetRegisterNoLoadLo(rd, ArmReg_R0);
@@ -2857,7 +3642,28 @@ void CCodeGeneratorARM::GenerateXOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 
 void CCodeGeneratorARM::GenerateNOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 {
-	
+	if (IsSignExtended32(rs) && IsSignExtended32(rt))
+	{
+		if (rs == N64Reg_R0 || rt == N64Reg_R0)
+		{
+			EN64Reg fromReg = (rs == N64Reg_R0) ? rt : rs;
+			EArmReg regf_lo = GetRegisterAndLoadLo(fromReg, ArmReg_R0);
+			EArmReg regd_lo = GetRegisterNoLoadLo(rd, ArmReg_R0);
+			MVN(regd_lo, regf_lo);
+			UpdateRegister(rd, regd_lo, URO_HI_SIGN_EXTEND);
+		}
+		else
+		{
+			EArmReg regt_lo = GetRegisterAndLoadLo(rt, ArmReg_R0);
+			EArmReg regs_lo = GetRegisterAndLoadLo(rs, ArmReg_R1);
+			EArmReg regd_lo = GetRegisterNoLoadLo(rd, ArmReg_R0);
+			ORR(regd_lo, regs_lo, regt_lo);
+			MVN(regd_lo, regd_lo);
+			UpdateRegister(rd, regd_lo, URO_HI_SIGN_EXTEND);
+		}
+		return;
+	}
+
 	if (rs == N64Reg_R0 || rt == N64Reg_R0)
 	{
 		EN64Reg fromReg;
@@ -2882,6 +3688,10 @@ void CCodeGeneratorARM::GenerateNOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 	}
 	else
 	{
+		if (rd == rs && mRegisterCache.IsHiSignExtended(rs))
+			FlushRegister(mRegisterCache, rs, 1, false);
+		if (rd == rt && mRegisterCache.IsHiSignExtended(rt))
+			FlushRegister(mRegisterCache, rt, 1, false);
 		EArmReg regt_lo = GetRegisterAndLoadLo(rt, ArmReg_R0);
 		EArmReg regs_lo = GetRegisterAndLoadLo(rs, ArmReg_R1);
 		EArmReg regd_lo = GetRegisterNoLoadLo(rd, ArmReg_R0);
@@ -2901,6 +3711,24 @@ void CCodeGeneratorARM::GenerateNOR( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 
 void CCodeGeneratorARM::GenerateAND( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 {
+	if (mRegisterCache.IsKnownValue(rs, 0) && mRegisterCache.IsKnownValue(rt, 0) &&
+		mRegisterCache.IsKnownValue(rs, 1) && mRegisterCache.IsKnownValue(rt, 1))
+	{
+		SetRegister64(rd,
+			mRegisterCache.GetKnownValue(rs, 0)._u32 & mRegisterCache.GetKnownValue(rt, 0)._u32,
+			mRegisterCache.GetKnownValue(rs, 1)._u32 & mRegisterCache.GetKnownValue(rt, 1)._u32);
+		return;
+	}
+	if (IsSignExtended32(rs) && IsSignExtended32(rt))
+	{
+		EArmReg regt_lo = GetRegisterAndLoadLo(rt, ArmReg_R0);
+		EArmReg regs_lo = GetRegisterAndLoadLo(rs, ArmReg_R1);
+		EArmReg regd_lo = GetRegisterNoLoadLo(rd, ArmReg_R0);
+		AND(regd_lo, regs_lo, regt_lo);
+		UpdateRegister(rd, regd_lo, URO_HI_SIGN_EXTEND);
+		return;
+	}
+
 	bool hi_done = false;
 	if (mRegisterCache.IsKnownValue(rs, 1) && mRegisterCache.IsKnownValue(rt, 1))
 	{
@@ -2919,6 +3747,13 @@ void CCodeGeneratorARM::GenerateAND( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 		return;
 	}
 
+	if (!hi_done)
+	{
+		if (rd == rs && mRegisterCache.IsHiSignExtended(rs))
+			FlushRegister(mRegisterCache, rs, 1, false);
+		if (rd == rt && mRegisterCache.IsHiSignExtended(rt))
+			FlushRegister(mRegisterCache, rt, 1, false);
+	}
 	EArmReg regt_lo = GetRegisterAndLoadLo(rt, ArmReg_R0);
 	EArmReg regs_lo = GetRegisterAndLoadLo(rs, ArmReg_R1);
 	EArmReg regd_lo = GetRegisterNoLoadLo(rd, ArmReg_R0);
@@ -2974,6 +3809,20 @@ void CCodeGeneratorARM::GenerateADDU( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 		LoadRegisterLo( reg_lo_d, rs );
 		UpdateRegister( rd, reg_lo_d, URO_HI_SIGN_EXTEND );
 	}
+	else if (mRegisterCache.IsKnownValue(rt, 0))
+	{
+		EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R0);
+		EArmReg regd = GetRegisterNoLoadLo(rd, ArmReg_R0);
+		ADD_IMM(regd, regs, mRegisterCache.GetKnownValue(rt, 0)._u32, ArmReg_R1);
+		UpdateRegister(rd, regd, URO_HI_SIGN_EXTEND);
+	}
+	else if (mRegisterCache.IsKnownValue(rs, 0))
+	{
+		EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+		EArmReg regd = GetRegisterNoLoadLo(rd, ArmReg_R0);
+		ADD_IMM(regd, regt, mRegisterCache.GetKnownValue(rs, 0)._u32, ArmReg_R1);
+		UpdateRegister(rd, regd, URO_HI_SIGN_EXTEND);
+	}
 	else
 	{
 		EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
@@ -2992,6 +3841,14 @@ void CCodeGeneratorARM::GenerateSUBU( EN64Reg rd, EN64Reg rs, EN64Reg rt )
 	{
 		SetRegister32s(rd, mRegisterCache.GetKnownValue(rs, 0)._s32
 			- mRegisterCache.GetKnownValue(rt, 0)._s32);
+		return;
+	}
+	if (mRegisterCache.IsKnownValue(rt, 0))
+	{
+		EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R0);
+		EArmReg regd = GetRegisterNoLoadLo(rd, ArmReg_R0);
+		SUB_IMM(regd, regs, mRegisterCache.GetKnownValue(rt, 0)._u32, ArmReg_R1);
+		UpdateRegister(rd, regd, URO_HI_SIGN_EXTEND);
 		return;
 	}
 	EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
@@ -3096,6 +3953,16 @@ void CCodeGeneratorARM::GenerateMTHI( EN64Reg rs )
 
 void CCodeGeneratorARM::GenerateSLT( EN64Reg rd, EN64Reg rs, EN64Reg rt, bool is_unsigned )
 {
+	if (mRegisterCache.IsKnownValue(rt, 0))
+	{
+		EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R0);
+		EArmReg regd = GetRegisterNoLoadLo(rd, ArmReg_R0);
+		CMP_IMM_U32(regs, mRegisterCache.GetKnownValue(rt, 0)._u32, ArmReg_R1);
+		MOV_IMM(regd, 0);
+		MOV_IMM(regd, 1, 0, is_unsigned ? CC : LT);
+		UpdateRegister(rd, regd, URO_HI_CLEAR);
+		return;
+	}
 	EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R0);
 	EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R1);
 	EArmReg regd = GetRegisterNoLoadLo(rd, ArmReg_R0);
@@ -3130,6 +3997,16 @@ void CCodeGeneratorARM::GenerateBEQ( EN64Reg rs, EN64Reg rt, const SBranchDetail
 	{
 		EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
 		CMP_IMM(regt, 0);
+	}
+	else if (mRegisterCache.IsKnownValue(rt, 0))
+	{
+		EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R0);
+		CMP_IMM_U32(regs, mRegisterCache.GetKnownValue(rt, 0)._u32, ArmReg_R1);
+	}
+	else if (mRegisterCache.IsKnownValue(rs, 0))
+	{
+		EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+		CMP_IMM_U32(regt, mRegisterCache.GetKnownValue(rs, 0)._u32, ArmReg_R1);
 	}
 	else
 	{
@@ -3167,6 +4044,16 @@ void CCodeGeneratorARM::GenerateBNE( EN64Reg rs, EN64Reg rt, const SBranchDetail
 	{
 		EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
 		CMP_IMM(regt, 0);
+	}
+	else if (mRegisterCache.IsKnownValue(rt, 0))
+	{
+		EArmReg regs = GetRegisterAndLoadLo(rs, ArmReg_R0);
+		CMP_IMM_U32(regs, mRegisterCache.GetKnownValue(rt, 0)._u32, ArmReg_R1);
+	}
+	else if (mRegisterCache.IsKnownValue(rs, 0))
+	{
+		EArmReg regt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+		CMP_IMM_U32(regt, mRegisterCache.GetKnownValue(rs, 0)._u32, ArmReg_R1);
 	}
 	else
 	{
@@ -3420,6 +4307,65 @@ void CCodeGeneratorARM::GenerateTRUNC_W_S( u32 fd, u32 fs )
 	UpdateFloatRegister(EN64FloatReg(fd));
 }
 
+void CCodeGeneratorARM::GenerateTRUNC_L_S( u32 fd, u32 fs )
+{
+	EArmVfpReg arm_fs = GetFloatRegisterAndLoad(EN64FloatReg(fs));
+	EArmVfpReg arm_fd_lo = EArmVfpReg(fd);
+	EArmVfpReg arm_fd_hi = EArmVfpReg(fd + 1);
+
+	VMOV_S(ArmReg_R0, arm_fs);
+	BIC_IMM(ArmReg_R1, ArmReg_R0, 0x80000000u, ArmReg_R2);
+	CMP_IMM_U32(ArmReg_R1, 0x4F000000u, ArmReg_R2); // |x| < 2^31 ?
+	CJumpLocation not_s32 = BX_IMM(CCodeLabel(nullptr), CS);
+
+	// Fast path 1: |x| < 2^31 (fits exactly in s32, sign-extend to s64).
+	VCVT_S32_F32(arm_fd_lo, arm_fs);
+	VMOV_S(ArmReg_R0, arm_fd_lo);
+	MOV_ASR_IMM(ArmReg_R1, ArmReg_R0, 31);
+	VMOV_S(arm_fd_hi, ArmReg_R1);
+	CJumpLocation done1 = BX_IMM(CCodeLabel(nullptr), AL);
+
+	PatchJumpLong(not_s32, GetAssemblyBuffer()->GetLabel());
+	// Fast path 2: 2^31 <= x < 2^32 (unsigned 32-bit float->u32 idiom in Rare/N64 games).
+	CMP_IMM_U32(ArmReg_R0, 0x4F800000u, ArmReg_R2);
+	CJumpLocation slow_path = BX_IMM(CCodeLabel(nullptr), CS);
+	VCVT_U32_F32(arm_fd_lo, arm_fs);
+	MOV_IMM(ArmReg_R1, 0);
+	VMOV_S(arm_fd_hi, ArmReg_R1);
+
+	if (IsBufferA())
+	{
+		CCodeLabel done = GetAssemblyBuffer()->GetLabel();
+		PatchJumpLong(done1, done);
+
+		SetBufferB();
+		PatchJumpLong(slow_path, GetAssemblyBuffer()->GetLabel());
+		VPUSH_S0_S15();
+		CALL(CCodeLabel(reinterpret_cast<const void *>(&CTR_TruncL_S_Slow)));
+		VPOP_S0_S15();
+		VMOV_S(arm_fd_lo, ArmReg_R0);
+		VMOV_S(arm_fd_hi, ArmReg_R1);
+		GenerateBranchAlways(done);
+		SetBufferA();
+	}
+	else
+	{
+		CJumpLocation done2 = BX_IMM(CCodeLabel(nullptr), AL);
+		PatchJumpLong(slow_path, GetAssemblyBuffer()->GetLabel());
+		VPUSH_S0_S15();
+		CALL(CCodeLabel(reinterpret_cast<const void *>(&CTR_TruncL_S_Slow)));
+		VPOP_S0_S15();
+		VMOV_S(arm_fd_lo, ArmReg_R0);
+		VMOV_S(arm_fd_hi, ArmReg_R1);
+		CCodeLabel done = GetAssemblyBuffer()->GetLabel();
+		PatchJumpLong(done1, done);
+		PatchJumpLong(done2, done);
+	}
+
+	UpdateFloatRegister(EN64FloatReg(fd));
+	UpdateFloatRegister(EN64FloatReg(fd + 1));
+}
+
 void CCodeGeneratorARM::GenerateCVT_W_S( u32 fd, u32 fs )
 {
 	EArmVfpReg arm_fs = GetFloatRegisterAndLoad(EN64FloatReg(fs));
@@ -3450,9 +4396,75 @@ void CCodeGeneratorARM::GenerateCVT_S_W( u32 fd, u32 fs )
 	UpdateFloatRegister(EN64FloatReg(fd));
 }
 
+void CCodeGeneratorARM::GenerateCVT_S_L( u32 fd, u32 fs )
+{
+	EArmVfpReg arm_fs_lo = GetFloatRegisterAndLoad(EN64FloatReg(fs));
+	EArmVfpReg arm_fs_hi = GetFloatRegisterAndLoad(EN64FloatReg(fs + 1));
+	EArmVfpReg arm_fd    = EArmVfpReg(fd);
+
+	VMOV_S(ArmReg_R0, arm_fs_lo);
+	VMOV_S(ArmReg_R1, arm_fs_hi);
+	MOV_ASR_IMM(ArmReg_R2, ArmReg_R0, 31);
+	CMP(ArmReg_R1, ArmReg_R2);
+	CJumpLocation not_s32 = BX_IMM(CCodeLabel(nullptr), NE);
+
+	// Fast path 1: sign-extended 32-bit integer.
+	VCVT_F32_S32(arm_fd, arm_fs_lo);
+	CJumpLocation done1 = BX_IMM(CCodeLabel(nullptr), AL);
+
+	PatchJumpLong(not_s32, GetAssemblyBuffer()->GetLabel());
+	// Fast path 2: zero-extended unsigned 32-bit integer (hi == 0).
+	CMP_IMM(ArmReg_R1, 0);
+	CJumpLocation slow_path = BX_IMM(CCodeLabel(nullptr), NE);
+	VCVT_F32_U32(arm_fd, arm_fs_lo);
+
+	if (IsBufferA())
+	{
+		CCodeLabel done = GetAssemblyBuffer()->GetLabel();
+		PatchJumpLong(done1, done);
+
+		SetBufferB();
+		PatchJumpLong(slow_path, GetAssemblyBuffer()->GetLabel());
+		VPUSH_S0_S15();
+		CALL(CCodeLabel(reinterpret_cast<const void *>(&CTR_CvtS_L_Slow)));
+		VPOP_S0_S15();
+		VMOV_S(arm_fd, ArmReg_R0);
+		GenerateBranchAlways(done);
+		SetBufferA();
+	}
+	else
+	{
+		CJumpLocation done2 = BX_IMM(CCodeLabel(nullptr), AL);
+		PatchJumpLong(slow_path, GetAssemblyBuffer()->GetLabel());
+		VPUSH_S0_S15();
+		CALL(CCodeLabel(reinterpret_cast<const void *>(&CTR_CvtS_L_Slow)));
+		VPOP_S0_S15();
+		VMOV_S(arm_fd, ArmReg_R0);
+		CCodeLabel done = GetAssemblyBuffer()->GetLabel();
+		PatchJumpLong(done1, done);
+		PatchJumpLong(done2, done);
+	}
+
+	UpdateFloatRegister(EN64FloatReg(fd));
+}
+
 void CCodeGeneratorARM::GenerateCVT_D_W( u32 fd, u32 fs )
 {
 	EArmVfpReg arm_fs = GetFloatRegisterAndLoad(EN64FloatReg(fs));
+	if (fd & 1)
+	{
+		VMOV_S(ArmReg_R2, arm_fs);
+		VPUSH_S0_S15();
+		VMOV_S(ArmVfpReg_S2, ArmReg_R2);
+		VCVT_F64_S32(EArmVfpReg(0), ArmVfpReg_S2);
+		VMOV(ArmReg_R0, ArmReg_R1, EArmVfpReg(0));
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
 	VCVT_F64_S32(arm_fd, arm_fs);
 	UpdateDoubleRegister(EN64FloatReg(fd));
@@ -3461,6 +4473,20 @@ void CCodeGeneratorARM::GenerateCVT_D_W( u32 fd, u32 fs )
 void CCodeGeneratorARM::GenerateCVT_D_S( u32 fd, u32 fs )
 {
 	EArmVfpReg arm_fs = GetFloatRegisterAndLoad(EN64FloatReg(fs));
+	if (fd & 1)
+	{
+		VMOV_S(ArmReg_R2, arm_fs);
+		VPUSH_S0_S15();
+		VMOV_S(ArmVfpReg_S2, ArmReg_R2);
+		VCVT_F64_F32(EArmVfpReg(0), ArmVfpReg_S2);
+		VMOV(ArmReg_R0, ArmReg_R1, EArmVfpReg(0));
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
 	VCVT_F64_F32(arm_fd, arm_fs);
 	UpdateDoubleRegister(EN64FloatReg(fd));
@@ -3492,6 +4518,24 @@ void CCodeGeneratorARM::GenerateCMP_S( u32 fs, u32 ft, EArmCond cond, u8 E )
 
 void CCodeGeneratorARM::GenerateADD_D( u32 fd, u32 fs, u32 ft )
 {
+	if ((fd | fs | ft) & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VMOV_S(ArmReg_R2, GetFloatRegisterAndLoad(EN64FloatReg(ft)));
+		VMOV_S(ArmReg_R3, GetFloatRegisterAndLoad(EN64FloatReg(ft + 1)));
+		VPUSH_S0_S15();
+		VMOV(EArmVfpReg(0), ArmReg_R0, ArmReg_R1);
+		VMOV(EArmVfpReg(1), ArmReg_R2, ArmReg_R3);
+		VADD_D(EArmVfpReg(0), EArmVfpReg(0), EArmVfpReg(1));
+		VMOV(ArmReg_R0, ArmReg_R1, EArmVfpReg(0));
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_ft = GetDoubleRegisterAndLoad(EN64FloatReg(ft));
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
@@ -3503,6 +4547,24 @@ void CCodeGeneratorARM::GenerateADD_D( u32 fd, u32 fs, u32 ft )
 
 void CCodeGeneratorARM::GenerateSUB_D( u32 fd, u32 fs, u32 ft )
 {
+	if ((fd | fs | ft) & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VMOV_S(ArmReg_R2, GetFloatRegisterAndLoad(EN64FloatReg(ft)));
+		VMOV_S(ArmReg_R3, GetFloatRegisterAndLoad(EN64FloatReg(ft + 1)));
+		VPUSH_S0_S15();
+		VMOV(EArmVfpReg(0), ArmReg_R0, ArmReg_R1);
+		VMOV(EArmVfpReg(1), ArmReg_R2, ArmReg_R3);
+		VSUB_D(EArmVfpReg(0), EArmVfpReg(0), EArmVfpReg(1));
+		VMOV(ArmReg_R0, ArmReg_R1, EArmVfpReg(0));
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_ft = GetDoubleRegisterAndLoad(EN64FloatReg(ft));
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
@@ -3514,6 +4576,24 @@ void CCodeGeneratorARM::GenerateSUB_D( u32 fd, u32 fs, u32 ft )
 
 void CCodeGeneratorARM::GenerateDIV_D( u32 fd, u32 fs, u32 ft )
 {
+	if ((fd | fs | ft) & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VMOV_S(ArmReg_R2, GetFloatRegisterAndLoad(EN64FloatReg(ft)));
+		VMOV_S(ArmReg_R3, GetFloatRegisterAndLoad(EN64FloatReg(ft + 1)));
+		VPUSH_S0_S15();
+		VMOV(EArmVfpReg(0), ArmReg_R0, ArmReg_R1);
+		VMOV(EArmVfpReg(1), ArmReg_R2, ArmReg_R3);
+		VDIV_D(EArmVfpReg(0), EArmVfpReg(0), EArmVfpReg(1));
+		VMOV(ArmReg_R0, ArmReg_R1, EArmVfpReg(0));
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_ft = GetDoubleRegisterAndLoad(EN64FloatReg(ft));
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
@@ -3525,6 +4605,24 @@ void CCodeGeneratorARM::GenerateDIV_D( u32 fd, u32 fs, u32 ft )
 
 void CCodeGeneratorARM::GenerateMUL_D( u32 fd, u32 fs, u32 ft )
 {
+	if ((fd | fs | ft) & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VMOV_S(ArmReg_R2, GetFloatRegisterAndLoad(EN64FloatReg(ft)));
+		VMOV_S(ArmReg_R3, GetFloatRegisterAndLoad(EN64FloatReg(ft + 1)));
+		VPUSH_S0_S15();
+		VMOV(EArmVfpReg(0), ArmReg_R0, ArmReg_R1);
+		VMOV(EArmVfpReg(1), ArmReg_R2, ArmReg_R3);
+		VMUL_D(EArmVfpReg(0), EArmVfpReg(0), EArmVfpReg(1));
+		VMOV(ArmReg_R0, ArmReg_R1, EArmVfpReg(0));
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_ft = GetDoubleRegisterAndLoad(EN64FloatReg(ft));
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
@@ -3536,6 +4634,21 @@ void CCodeGeneratorARM::GenerateMUL_D( u32 fd, u32 fs, u32 ft )
 
 void CCodeGeneratorARM::GenerateSQRT_D( u32 fd, u32 fs )
 {
+	if ((fd | fs) & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VPUSH_S0_S15();
+		VMOV(EArmVfpReg(0), ArmReg_R0, ArmReg_R1);
+		VSQRT_D(EArmVfpReg(0), EArmVfpReg(0));
+		VMOV(ArmReg_R0, ArmReg_R1, EArmVfpReg(0));
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
 
@@ -3546,6 +4659,17 @@ void CCodeGeneratorARM::GenerateSQRT_D( u32 fd, u32 fs )
 
 void CCodeGeneratorARM::GenerateABS_D( u32 fd, u32 fs )
 {
+	if ((fd | fs) & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		BIC_IMM(ArmReg_R1, ArmReg_R1, 0x80000000u, ArmReg_R2);
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
 
@@ -3556,6 +4680,16 @@ void CCodeGeneratorARM::GenerateABS_D( u32 fd, u32 fs )
 
 void CCodeGeneratorARM::GenerateMOV_D( u32 fd, u32 fs )
 {
+	if ((fd | fs) & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
 
@@ -3566,6 +4700,17 @@ void CCodeGeneratorARM::GenerateMOV_D( u32 fd, u32 fs )
 
 void CCodeGeneratorARM::GenerateNEG_D( u32 fd, u32 fs )
 {
+	if ((fd | fs) & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		XOR_IMM(ArmReg_R1, ArmReg_R1, 0x80000000u, ArmReg_R2);
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		VMOV_S(EArmVfpReg(fd + 1), ArmReg_R1);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		UpdateFloatRegister(EN64FloatReg(fd + 1));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_fd = EArmVfpReg(fd/2);
 
@@ -3576,6 +4721,19 @@ void CCodeGeneratorARM::GenerateNEG_D( u32 fd, u32 fs )
 
 void CCodeGeneratorARM::GenerateTRUNC_W_D( u32 fd, u32 fs )
 {
+	if (fs & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VPUSH_S0_S15();
+		VMOV(EArmVfpReg(0), ArmReg_R0, ArmReg_R1);
+		VCVT_S32_F64(ArmVfpReg_S2, EArmVfpReg(0));
+		VMOV_S(ArmReg_R0, ArmVfpReg_S2);
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_fd = EArmVfpReg(fd);
 
@@ -3586,6 +4744,19 @@ void CCodeGeneratorARM::GenerateTRUNC_W_D( u32 fd, u32 fs )
 
 void CCodeGeneratorARM::GenerateCVT_W_D( u32 fd, u32 fs )
 {
+	if (fs & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VPUSH_S0_S15();
+		VMOV(EArmVfpReg(0), ArmReg_R0, ArmReg_R1);
+		VCVTR_S32_F64(ArmVfpReg_S2, EArmVfpReg(0));
+		VMOV_S(ArmReg_R0, ArmVfpReg_S2);
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_fd = EArmVfpReg(fd);
 
@@ -3596,6 +4767,19 @@ void CCodeGeneratorARM::GenerateCVT_W_D( u32 fd, u32 fs )
 
 void CCodeGeneratorARM::GenerateCVT_S_D( u32 fd, u32 fs )
 {
+	if (fs & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VPUSH_S0_S15();
+		VMOV(EArmVfpReg(0), ArmReg_R0, ArmReg_R1);
+		VCVT_F32_F64(ArmVfpReg_S2, EArmVfpReg(0));
+		VMOV_S(ArmReg_R0, ArmVfpReg_S2);
+		VPOP_S0_S15();
+		VMOV_S(EArmVfpReg(fd), ArmReg_R0);
+		UpdateFloatRegister(EN64FloatReg(fd));
+		return;
+	}
 	EArmVfpReg arm_fs = GetDoubleRegisterAndLoad(EN64FloatReg(fs));
 	EArmVfpReg arm_fd = EArmVfpReg(fd);
 
@@ -3611,6 +4795,22 @@ void CCodeGeneratorARM::GenerateCMP_D( u32 fs, u32 ft, EArmCond cond, u8 E )
 		LDR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, FPUControl[31]._u32));
 		BIC_IMM(ArmReg_R0, ArmReg_R1, FPCSR_C, ArmReg_R0);
 		STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, FPUControl[31]._u32));
+	}
+	else if ((fs | ft) & 1)
+	{
+		VMOV_S(ArmReg_R0, GetFloatRegisterAndLoad(EN64FloatReg(fs)));
+		VMOV_S(ArmReg_R1, GetFloatRegisterAndLoad(EN64FloatReg(fs + 1)));
+		VMOV_S(ArmReg_R2, GetFloatRegisterAndLoad(EN64FloatReg(ft)));
+		VMOV_S(ArmReg_R3, GetFloatRegisterAndLoad(EN64FloatReg(ft + 1)));
+		VPUSH_S0_S15();
+		VMOV(EArmVfpReg(0), ArmReg_R0, ArmReg_R1);
+		VMOV(EArmVfpReg(1), ArmReg_R2, ArmReg_R3);
+		LDR(ArmReg_R1, ArmReg_R12, offsetof(SCPUState, FPUControl[31]._u32));
+		BIC_IMM(ArmReg_R0, ArmReg_R1, FPCSR_C, ArmReg_R0);
+		VCMP_D(EArmVfpReg(0), EArmVfpReg(1), E);
+		ORR_IMM_COND(ArmReg_R0, ArmReg_R0, 0x02, 0x5, cond);
+		STR(ArmReg_R0, ArmReg_R12, offsetof(SCPUState, FPUControl[31]._u32));
+		VPOP_S0_S15();
 	}
 	else
 	{
@@ -3640,6 +4840,139 @@ inline void	CCodeGeneratorARM::GenerateMFC0( EN64Reg rt, u32 fs )
 	UpdateRegister( rt, reg_dst, URO_HI_SIGN_EXTEND );
 }
 
+void CCodeGeneratorARM::GenerateMTC0( u32 fs, EN64Reg rt )
+{
+	switch (fs)
+	{
+		case C0_RAND:
+		case C0_BADVADDR:
+		case C0_PRID:
+		case C0_CACHE_ERR:
+			// Read-only CP0 registers.
+			return;
+
+		case C0_INX:
+		{
+			EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+			AND_IMM(ArmReg_R0, reg_rt, 0x8000003Fu, ArmReg_R1);
+			SetVar(&gCPUState.CPUControl[C0_INX]._u32, ArmReg_R0);
+			return;
+		}
+		case C0_ENTRYLO0:
+		case C0_ENTRYLO1:
+		{
+			EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+			BIC_IMM(ArmReg_R0, reg_rt, 0xC0000000u, ArmReg_R1);
+			SetVar(&gCPUState.CPUControl[fs]._u32, ArmReg_R0);
+			return;
+		}
+		case C0_PAGEMASK:
+		{
+			EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+			AND_IMM(ArmReg_R0, reg_rt, 0x01FFE000u, ArmReg_R1);
+			SetVar(&gCPUState.CPUControl[C0_PAGEMASK]._u32, ArmReg_R0);
+			return;
+		}
+		case C0_WIRED:
+		{
+			EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+			SetVar(&gCPUState.CPUControl[C0_RAND]._u32, 31);
+			SetVar(&gCPUState.CPUControl[C0_WIRED]._u32, reg_rt);
+			return;
+		}
+		case C0_CAUSE:
+		{
+			EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+			GetVar(ArmReg_R1, &gCPUState.CPUControl[C0_CAUSE]._u32);
+			BIC_IMM(ArmReg_R1, ArmReg_R1, CAUSE_SW1 | CAUSE_SW2, ArmReg_R2);
+			AND_IMM(ArmReg_R2, reg_rt, CAUSE_SW1 | CAUSE_SW2, ArmReg_R3);
+			ORR(ArmReg_R1, ArmReg_R1, ArmReg_R2);
+			SetVar(&gCPUState.CPUControl[C0_CAUSE]._u32, ArmReg_R1);
+			return;
+		}
+		case C0_COMPARE:
+		{
+			EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+			if (reg_rt != ArmReg_R0)
+				MOV(ArmReg_R0, reg_rt);
+			VPUSH_S0_S15();
+			CALL(CCodeLabel(reinterpret_cast<const void *>(&CPU_SetCompare)));
+			VPOP_S0_S15();
+			return;
+		}
+		case C0_SR:
+		{
+			EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+			GetVar(ArmReg_R1, &gCPUState.CPUControl[C0_SR]._u32);
+			XOR(ArmReg_R2, ArmReg_R1, reg_rt);
+			TST_IMM(ArmReg_R2, 0x02, 0x02); // SR_CU1 = 0x20000000
+			CJumpLocation slow_cu1 = BX_IMM(CCodeLabel(nullptr), NE);
+
+			SetVar(&gCPUState.CPUControl[C0_SR]._u32, reg_rt);
+
+			// Check if IE transitioned 0 -> 1 with pending masked interrupts.
+			BIC(ArmReg_R2, reg_rt, ArmReg_R1);
+			TST_IMM(ArmReg_R2, 1, 0);
+			CJumpLocation done_no_ie = BX_IMM(CCodeLabel(nullptr), EQ);
+
+			GetVar(ArmReg_R3, &gCPUState.CPUControl[C0_CAUSE]._u32);
+			AND(ArmReg_R3, ArmReg_R3, reg_rt);
+			TST_IMM(ArmReg_R3, 0xFF, 0x0C); // CAUSE_IPMASK = 0x0000FF00
+			CJumpLocation slow_irq = BX_IMM(CCodeLabel(nullptr), NE);
+
+			if (IsBufferA())
+			{
+				CCodeLabel done = GetAssemblyBuffer()->GetLabel();
+				PatchJumpLong(done_no_ie, done);
+
+				SetBufferB();
+				PatchJumpLong(slow_cu1, GetAssemblyBuffer()->GetLabel());
+				if (reg_rt != ArmReg_R0)
+					MOV(ArmReg_R0, reg_rt);
+				VPUSH_S0_S15();
+				CALL(CCodeLabel(reinterpret_cast<const void *>(&R4300_SetSR)));
+				VPOP_S0_S15();
+				GenerateBranchAlways(done);
+
+				PatchJumpLong(slow_irq, GetAssemblyBuffer()->GetLabel());
+				VPUSH_S0_S15();
+				CALL(CCodeLabel(reinterpret_cast<const void *>(&CTR_AddCheckInterrupts)));
+				VPOP_S0_S15();
+				GenerateBranchAlways(done);
+				SetBufferA();
+			}
+			else
+			{
+				CJumpLocation done_ok = BX_IMM(CCodeLabel(nullptr), AL);
+				PatchJumpLong(slow_cu1, GetAssemblyBuffer()->GetLabel());
+				if (reg_rt != ArmReg_R0)
+					MOV(ArmReg_R0, reg_rt);
+				VPUSH_S0_S15();
+				CALL(CCodeLabel(reinterpret_cast<const void *>(&R4300_SetSR)));
+				VPOP_S0_S15();
+				CJumpLocation done_cu1 = BX_IMM(CCodeLabel(nullptr), AL);
+
+				PatchJumpLong(slow_irq, GetAssemblyBuffer()->GetLabel());
+				VPUSH_S0_S15();
+				CALL(CCodeLabel(reinterpret_cast<const void *>(&CTR_AddCheckInterrupts)));
+				VPOP_S0_S15();
+
+				CCodeLabel done = GetAssemblyBuffer()->GetLabel();
+				PatchJumpLong(done_no_ie, done);
+				PatchJumpLong(done_ok, done);
+				PatchJumpLong(done_cu1, done);
+			}
+			return;
+		}
+		default:
+		{
+			EArmReg reg_rt = GetRegisterAndLoadLo(rt, ArmReg_R0);
+			SetVar(&gCPUState.CPUControl[fs]._u32, reg_rt);
+			return;
+		}
+	}
+}
+
 void CCodeGeneratorARM::GenerateMFC1( EN64Reg rt, u32 fs )
 {
 	EArmReg regt = GetRegisterNoLoadLo(rt, ArmReg_R0);
@@ -3647,6 +4980,26 @@ void CCodeGeneratorARM::GenerateMFC1( EN64Reg rt, u32 fs )
 	VMOV_S(regt, arm_fs);
 
 	UpdateRegister(rt, regt, URO_HI_SIGN_EXTEND);
+}
+
+void CCodeGeneratorARM::GenerateDMFC1( EN64Reg rt, u32 fs )
+{
+	if (rt == N64Reg_R0)
+		return;
+
+	EArmReg reg_lo = GetRegisterNoLoadLo(rt, ArmReg_R0);
+	if (mRegisterCache.IsFPValid(EN64FloatReg(fs)))
+		VMOV_S(reg_lo, EArmVfpReg(fs));
+	else
+		LDR(reg_lo, ArmReg_R12, offsetof(SCPUState, FPU[fs]._u32));
+	StoreRegisterLo(rt, reg_lo);
+
+	EArmReg reg_hi = GetRegisterNoLoadHi(rt, ArmReg_R1);
+	if (mRegisterCache.IsFPValid(EN64FloatReg(fs + 1)))
+		VMOV_S(reg_hi, EArmVfpReg(fs + 1));
+	else
+		LDR(reg_hi, ArmReg_R12, offsetof(SCPUState, FPU[fs + 1]._u32));
+	StoreRegisterHi(rt, reg_hi);
 }
 
 void CCodeGeneratorARM::GenerateMTC1( u32 fs, EN64Reg rt )
@@ -3658,6 +5011,18 @@ void CCodeGeneratorARM::GenerateMTC1( u32 fs, EN64Reg rt )
 	VMOV_S(arm_fs, regt);
 	
 	UpdateFloatRegister(EN64FloatReg(fs));
+}
+
+void CCodeGeneratorARM::GenerateDMTC1( u32 fs, EN64Reg rt )
+{
+	EArmReg reg_lo = GetRegisterAndLoadLo(rt, ArmReg_R0);
+	EArmReg reg_hi = GetRegisterAndLoadHi(rt, ArmReg_R1);
+
+	VMOV_S(EArmVfpReg(fs), reg_lo);
+	VMOV_S(EArmVfpReg(fs + 1), reg_hi);
+
+	UpdateFloatRegister(EN64FloatReg(fs));
+	UpdateFloatRegister(EN64FloatReg(fs + 1));
 }
 
 void CCodeGeneratorARM::GenerateCFC1( EN64Reg rt, u32 fs )

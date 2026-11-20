@@ -59,6 +59,8 @@ class CAssemblyWriterARM
 		void				SUB(EArmReg rd, EArmReg rn, EArmReg rm, EArmCond = AL, u8 S = 0);
 		void				SUB_IMM(EArmReg rd, EArmReg rn, u32 imm, EArmReg temp);
 		void				SUB_IMM(EArmReg rd, EArmReg rn, u8 imm, u8 ror);
+		void				SUBS_IMM(EArmReg rd, EArmReg rn, u8 imm);
+		void				RSB_IMM(EArmReg rd, EArmReg rn, u8 imm);
 
 		void				MUL  (EArmReg rd, EArmReg rn, EArmReg rm);
 		void				UMULL(EArmReg rdLo, EArmReg rdHi, EArmReg rn, EArmReg rm);
@@ -75,6 +77,8 @@ class CAssemblyWriterARM
 		void				ORR(EArmReg rd, EArmReg rn, EArmReg rm);
 		void				ORR_IMM(EArmReg rd, EArmReg rn, u32 imm, EArmReg temp);
 		void				ORR_IMM_COND(EArmReg rd, EArmReg rn, u8 imm, u8 ror4, EArmCond cond);
+		void				ORR_LSL_REG(EArmReg rd, EArmReg rn, EArmReg rm, EArmReg rs, EArmCond cond = AL);
+		void				ORR_LSR_REG(EArmReg rd, EArmReg rn, EArmReg rm, EArmReg rs, EArmCond cond = AL);
 		
 		void				XOR(EArmReg rd, EArmReg rn, EArmReg rm);
 		void                XOR_IMM(EArmReg rd, EArmReg rn, u8 imm);
@@ -140,10 +144,14 @@ class CAssemblyWriterARM
 		void				VNEG (EArmVfpReg Sd, EArmVfpReg Sm);
 		void				VCMP (EArmVfpReg Sd, EArmVfpReg Sm, u8 E = 0);
 		void				VCVT_S32_F32(EArmVfpReg Sd, EArmVfpReg Sm);
+		void				VCVT_U32_F32(EArmVfpReg Sd, EArmVfpReg Sm);
 		void				VCVTR_S32_F32(EArmVfpReg Sd, EArmVfpReg Sm);
 		void				VCVT_F32_S32(EArmVfpReg Sd, EArmVfpReg Sm);
+		void				VCVT_F32_U32(EArmVfpReg Sd, EArmVfpReg Sm);
 		void				VCVT_F64_F32(EArmVfpReg Dd, EArmVfpReg Sm);
 		void				VCVT_F64_S32(EArmVfpReg Dd, EArmVfpReg Sm);
+		void				VPUSH_S0_S15();
+		void				VPOP_S0_S15();
 		
 		void				VMOV_S(EArmReg Rt, EArmVfpReg Dm);
 		void				VMOV_S(EArmVfpReg Dm, EArmReg Rt);

@@ -345,16 +345,23 @@ int main(int argc, char* argv[])
 		}
 
 		FrontendCTR::ReleaseAssets();
-		if (System_Open(fullpath))
+		bool keepRestarting = true;
+		while (keepRestarting && !shouldQuit)
 		{
-			UI::BeginRomSession();
-			CPU_Run();
-			UI::EndRomSession();
-			System_Close();
-		}
-		else
-		{
-			printf("Failed to open ROM: %s\n", fullpath);
+			keepRestarting = false;
+			if (System_Open(fullpath))
+			{
+				UI::BeginRomSession();
+				CPU_Run();
+				UI::EndRomSession();
+				System_Close();
+				if (!shouldQuit && FrontendCTR::ConsumeResetRequest())
+					keepRestarting = true;
+			}
+			else
+			{
+				printf("Failed to open ROM: %s\n", fullpath);
+			}
 		}
 	}
 	

@@ -3,6 +3,8 @@
 // nothing here touches citro2d/citro3d.
 #include "stdafx.h"
 #include "UserInterface.h"
+#include "TouchControllerCTR.h"
+#include "Core/ROM.h"
 #include "SysCTR/HLEGraphics/RendererCTR.h"
 
 #include <3ds.h>
@@ -35,6 +37,12 @@ void HandleGameInput(u32 keysDown, u32 keysHeld)
         s_selectArmed = false;
         s_pauseRequested = true;
     }
+}
+
+void RequestPause()
+{
+    if (s_romActive)
+        s_pauseRequested = true;
 }
 
 bool IsCapturingInput()
@@ -73,10 +81,12 @@ void BeginRomSession()
     s_romActive = true;
     s_inputQuarantine = true;
     ResetInput();
+    TouchController::BeginSession(g_ROM.settings.GameName.c_str());
 }
 
 void EndRomSession()
 {
+    TouchController::EndSession();
     s_romActive = false;
     s_inputQuarantine = false;
     ResetInput();

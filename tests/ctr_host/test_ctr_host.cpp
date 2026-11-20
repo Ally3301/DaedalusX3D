@@ -2,6 +2,10 @@
 #include "stdafx.h"
 #include "Utility/Thread.h"
 #include "Utility/Timing.h"
+#include "SysCTR/UI/UITheme.h"
+#include "SysCTR/UI/UITouchInput.h"
+#include "SysCTR/UI/TouchControllerCTR.h"
+#include "SysCTR/UI/CoverScraperCTR.h"
 #include "DynaRec/FragmentCacheCoverage.h"
 #include <3ds.h>
 
@@ -210,6 +214,173 @@ void test_timing() {
         CHECK(NTiming::ToMilliseconds(t) == expected);
     }
 }
+void test_ui_theme_and_touch() {
+    // Theme helpers & Light/Dark toggle
+    CHECK(UI::RGBA(0x12, 0x34, 0x56, 0x78) == 0x78563412u);
+    CHECK(UI::WithAlpha(0xFF563412u, 0x40) == 0x40563412u);
+    CHECK(UI::ToClearRGBA8(UI::RGBA(0x12, 0x34, 0x56, 0xFF)) == 0x123456FFu);
+    CHECK(UI::LerpColor(UI::RGBA(0, 0, 0, 255), UI::RGBA(100, 200, 50, 255), 0.5f) ==
+          UI::RGBA(50, 100, 25, 255));
+
+    UI::SetThemeIndex(UI::THEME_DARK);
+    CHECK(!UI::ActiveTheme().isLight);
+    UI::ToggleLightDark();
+    CHECK(UI::GetThemeIndex() == UI::THEME_LIGHT);
+    CHECK(UI::ActiveTheme().isLight);
+    UI::ToggleLightDark();
+    CHECK(UI::GetThemeIndex() == UI::THEME_DARK);
+    UI::CycleTheme(-1);
+    CHECK(UI::GetThemeIndex() == UI::THEME_COUNT - 1);
+    UI::CycleTheme(1);
+    CHECK(UI::GetThemeIndex() == UI::THEME_DARK);
+
+    // TouchTracker: ignore spurious (0,0) hardware edge frames
+    UI::TouchTracker t;
+    t.Reset();
+    t.UpdateRaw(true, 0, 0);
+    CHECK(!t.active && !t.justPressed);
+
+    // Clean tap inside rect
+    UI::Rect btn = { 20.0f, 40.0f, 80.0f, 30.0f };
+    t.UpdateRaw(true, 50, 55);
+    CHECK(t.active && t.justPressed && !t.dragged);
+    CHECK(t.PressedIn(btn));
+    CHECK(t.holdFrames == 1);
+    t.UpdateRaw(true, 52, 56); // 2px jitter stays below 8px drag threshold
+    CHECK(!t.dragged && t.holdFrames == 2);
+    CHECK(t.HoldProgress(4) == 0.5f);
+    t.UpdateRaw(false, 0, 0);
+    CHECK(!t.active && t.justReleased && !t.dragged);
+    CHECK(t.TappedIn(btn));
+
+    // Drag gesture exceeds 8px threshold and does not fire tap on release
+    t.UpdateRaw(true, 50, 55);
+    t.UpdateRaw(true, 50, 70);
+    CHECK(t.dragged && t.deltaY == 15.0f);
+    t.UpdateRaw(false, 0, 0);
+    CHECK(t.justReleased && !t.TappedIn(btn));
+
+    // RepeatTimer initial trigger + repeat cadence
+    UI::RepeatTimer rep;
+    rep.Reset();
+    CHECK(rep.Poll(1u, 1u, 1u, 0));
+    int repeats = 0;
+    for (int f = 0; f < 22; ++f) {
+        if (rep.Poll(0u, 1u, 1u, 0))
+            ++repeats;
+    }
+    CHECK(repeats == 2); // frames 18 and 22
+    CHECK(!rep.Poll(0u, 0u, 1u, 0));
+}
+
+void test_touch_controller() {
+    UI::TouchPadEngine eng;
+    UI::TouchPadOutput out;
+
+    // Default layout must be C-Buttons Cross
+    CHECK(eng.GetConfig().layout == UI::TOUCH_LAYOUT_CCROSS);
+
+    // 1) C-Buttons Cross: cardinals + diagonal slide (pad centered at 216, 132)
+    eng.Update(true, 216, 83, out); // C-Up
+    CHECK(out.n64Buttons == UI::N64Mask::kCUp && !out.swapSticks);
+    eng.Update(true, 265, 132, out); // Slide to C-Right (elastic capture stays locked!)
+    CHECK(out.n64Buttons == UI::N64Mask::kCRight);
+    eng.Update(true, 255, 93, out); // Diagonal C-Up + C-Right
+    CHECK(out.n64Buttons == (UI::N64Mask::kCUp | UI::N64Mask::kCRight));
+    eng.Update(false, 0, 0, out); // Release clears buttons
+    CHECK(out.n64Buttons == 0u);
+
+    // 2) Dedicated Z trigger (Hold) + Z-Lock latch/unlatch (left col x=10..104)
+    eng.Update(true, 55, 75, out);
+    CHECK(out.n64Buttons == UI::N64Mask::kZTrig && eng.IsZActive() && !eng.IsZLatched());
+    eng.Update(false, 0, 0, out);
+    CHECK(out.n64Buttons == 0u);
+    eng.Update(true, 55, 134, out); // Tap Z-Lock pill (y=123..149)
+    CHECK(eng.IsZLatched() && (out.n64Buttons & UI::N64Mask::kZTrig) != 0u);
+    eng.Update(false, 0, 0, out);
+    CHECK(eng.IsZLatched() && (out.n64Buttons & UI::N64Mask::kZTrig) != 0u);
+    eng.Update(true, 55, 134, out); // Tap again unlocks
+    CHECK(!eng.IsZLatched());
+    eng.Update(false, 0, 0, out);
+
+    // 3) Quick Save hold guard: must NOT fire before 21 frames, fires at frame 21
+    bool qsFiredEarly = false;
+    for (int f = 1; f < UI::TouchPadEngine::kQuickHoldFrames; ++f) {
+        eng.Update(true, 30, 180, out);
+        if (out.requestQuickSave) qsFiredEarly = true;
+    }
+    CHECK(!qsFiredEarly && eng.QuickSaveProgress() > 0.9f);
+    eng.Update(true, 30, 180, out);
+    CHECK(out.requestQuickSave);
+    eng.Update(true, 30, 180, out); // One-shot: doesn't re-fire while still held
+    CHECK(!out.requestQuickSave);
+    eng.Update(false, 0, 0, out);
+
+    // 4) Top bar mode cycle: C-Cross -> C-Stick -> Dual-Analog Shooter -> D-Pad
+    eng.Update(true, 180, 12, out);
+    eng.Update(false, 0, 0, out);
+    CHECK(eng.GetConfig().layout == UI::TOUCH_LAYOUT_CSTICK);
+
+    // C-Stick deadzone check (center does nothing; far left triggers C-Left)
+    eng.Update(true, 220, 132, out);
+    CHECK(out.n64Buttons == 0u);
+    eng.Update(true, 120, 132, out); // Dragged past outer radius: elastic capture still holds!
+    CHECK(out.n64Buttons == UI::N64Mask::kCLeft);
+    eng.Update(false, 0, 0, out);
+
+    // 5) Dual-Analog Shooter mode: proportional N64 Main Stick + swapSticks
+    UI::TouchPadConfig cfg = eng.GetConfig();
+    cfg.layout = UI::TOUCH_LAYOUT_DUAL_SHOOTER;
+    cfg.invertY = true;
+    eng.SetConfig(cfg);
+    eng.Update(true, 216, 60, out); // Up on screen -> inverted Y gives negative analogY
+    CHECK(out.swapSticks && out.analogY < -50 && out.n64Buttons == 0u);
+    eng.Update(false, 0, 0, out);
+
+    // 6) Left-Handed mirror puts pad at x=104 and Z trigger at x=216..310
+    cfg.layout = UI::TOUCH_LAYOUT_DPAD;
+    cfg.leftHanded = true;
+    eng.SetConfig(cfg);
+    eng.Update(true, 104, 80, out); // D-Up on left side
+    CHECK(out.n64Buttons == UI::N64Mask::kDUp);
+    eng.Update(false, 0, 0, out);
+    eng.Update(true, 260, 75, out); // Z trigger on right side
+    CHECK(out.n64Buttons == UI::N64Mask::kZTrig);
+    eng.Update(false, 0, 0, out);
+
+    // 7) Sleep & Wake + Top bar Pause button
+    eng.Update(true, 250, 12, out); // Moon button
+    eng.Update(false, 0, 0, out);
+    CHECK(eng.GetConfig().layout == UI::TOUCH_LAYOUT_SLEEP);
+    eng.Update(true, 160, 120, out); // Tap anywhere wakes back to D-Pad
+    eng.Update(false, 0, 0, out);
+    CHECK(eng.GetConfig().layout == UI::TOUCH_LAYOUT_DPAD);
+
+    eng.Update(true, 290, 12, out); // Pause button
+    eng.Update(false, 0, 0, out);
+    CHECK(out.requestPause);
+}
+
+void test_cover_scraper() {
+    CHECK(UI::CoverScraper::UrlEncodePathComponent("Super Mario 64 (USA).png") ==
+          "Super%20Mario%2064%20%28USA%29.png");
+
+    std::vector<std::string> urls;
+    UI::CoverScraper::BuildCandidateUrls("Mario Kart 64 (ESP) [!].z64", "MARIOKART64", "EUR", urls);
+    CHECK(urls.size() >= 3);
+    CHECK(urls[0].find("Mario%20Kart%2064%20%28ESP%29.png") != std::string::npos);
+    CHECK(urls[1].find("Mario%20Kart%2064%20%28USA%29.png") != std::string::npos);
+    CHECK(urls[2].find("Mario%20Kart%2064%20%28Europe%29.png") != std::string::npos);
+
+    UI::CoverScraper::BuildCandidateUrls("The Legend of Zelda - Ocarina of Time (v1.0).z64",
+                                         "The Legend of Zelda - Ocarina of Time (v1.0)", "USA", urls);
+    bool foundNoIntroThe = false;
+    for (const std::string & u : urls) {
+        if (u.find("Legend%20of%20Zelda%2C%20The%20-%20Ocarina%20of%20Time%20%28USA%29.png") != std::string::npos)
+            foundNoIntroThe = true;
+    }
+    CHECK(foundNoIntroThe);
+}
 }
 
 int main() {
@@ -217,6 +388,9 @@ int main() {
     test_thread_operations();
     test_fragment_cache_coverage();
     test_timing();
+    test_ui_theme_and_touch();
+    test_touch_controller();
+    test_cover_scraper();
     std::printf("CTR host tests passed (%d checks)\n", checks);
     return 0;
 }

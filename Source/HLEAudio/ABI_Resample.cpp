@@ -74,13 +74,26 @@ void RESAMPLE3(AudioHLECommand command)
   		Accum = 0;
   	}
 
-  	for(u32 i=0;i < 0x170/2;i++)
+  	s16 * outPtr = dst + dstPtr;
+  	for(u32 i=0;i < 0x170/4;i++)
   	{
-  		dst[dstPtr^1] = src[srcPtr^1] + FixedPointMul16( src[(srcPtr+1)^1] - src[srcPtr^1], Accum );
-  		++dstPtr;
+  		const s32 s0 = src[srcPtr^1];
+  		const s32 s1 = src[(srcPtr+1)^1];
+  		const s16 v0 = static_cast<s16>(s0 + FixedPointMul16( s1 - s0, Accum ));
   		Accum += Pitch;
   		srcPtr += (Accum>>16);
   		Accum &= 0xFFFF;
+
+  		const s32 s2 = src[srcPtr^1];
+  		const s32 s3 = src[(srcPtr+1)^1];
+  		const s16 v1 = static_cast<s16>(s2 + FixedPointMul16( s3 - s2, Accum ));
+  		Accum += Pitch;
+  		srcPtr += (Accum>>16);
+  		Accum &= 0xFFFF;
+
+  		outPtr[1] = v0;
+  		outPtr[0] = v1;
+  		outPtr += 2;
   	}
 
   	((u16 *)rdram)[((addy/2))^1] = src[srcPtr^1];

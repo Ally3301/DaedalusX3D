@@ -27,6 +27,11 @@ namespace Citro3D
 	void SplitGameFrame();
 	bool IsGameFrameActive();
 
+	// Lightweight in-game bottom-screen HUD pass inside an active game frame.
+	// Uses an opaque quad instead of GX_MemoryFill so zero C3D_FrameSplit occurs.
+	bool BeginGameBottomPass();
+	void EndGameBottomPass();
+
 	// UI frame lifecycle (top + bottom screens for FrontendCTR).
 	void BeginUIFrame();
 	void BeginUIScreen(gfxScreen_t screen, int width, int height, u32 clearRGBA8);

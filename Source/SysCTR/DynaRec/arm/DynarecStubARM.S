@@ -132,23 +132,32 @@ _IndirectExitCheck:
 	bne		_IndirectExitToC
 
 _IndirectExitLookup:
-	// 1) Per-callsite MRU slot 0 (catches tight polymorphic / colliding callers in 3 cycles)
+	// 1) Per-callsite MRU slot 0 & slot 1 (catches tight polymorphic / alternating callers in 3-6 cycles)
 	ldr		r1, [r4, #4]
 	cmp		r1, r5
-	bne		1f
+	bne		0f
 	ldr		r0, [r4, #8]
+	cmp		r0, #0
+	beq		0f
+	mov		r12, r6
+	bx		r0
+0:
+	ldr		r1, [r4, #12]
+	cmp		r1, r5
+	bne		1f
+	ldr		r0, [r4, #16]
 	cmp		r0, #0
 	beq		1f
 	mov		r12, r6
 	bx		r0
 1:
-	// 2) Global 4096-entry direct-mapped native target table (Ari64 mini_ht):
+	// 2) Global 8192-entry direct-mapped native target table (Ari64 mini_ht):
 	//    Resolves JR $ra, jump tables, and OSHLE returns (sinf/cosf/bcopy/guMtx*) in ~8 cycles
-	//    with zero C++ call overhead across up to 4096 distinct return addresses.
+	//    with zero C++ call overhead across up to 8192 distinct return addresses.
 	lsr		r1, r5, #2
-	eor		r1, r1, r5, lsr #14
-	lsl		r1, r1, #20
-	lsr		r1, r1, #20
+	eor		r1, r1, r5, lsr #15
+	lsl		r1, r1, #19
+	lsr		r1, r1, #19
 	ldr		r3, =gIndirectJumpTable
 	add		r3, r3, r1, lsl #3
 	ldmia	r3, {r0, r1}			// r0 = entry.addr ([r3, #0]), r1 = entry.target ([r3, #4])

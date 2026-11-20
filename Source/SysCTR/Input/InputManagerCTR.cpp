@@ -20,6 +20,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "stdafx.h"
 #include "Input/InputManager.h"
 #include "SysCTR/UI/UserInterface.h"
+#include "SysCTR/UI/TouchControllerCTR.h"
 
 #include <stack>
 #include <string>
@@ -351,9 +352,33 @@ void IInputManager::GetState( OSContPad pPad[4] )
 		return;
 
 	hidCircleRead(&circlepad);
-	pPad[0].stick_x = circlepad.dx / 2;
-	pPad[0].stick_y = circlepad.dy / 2;
-	pPad[0].button = mpControllerConfig->GetN64ButtonsState(keys_held & ~KEY_SELECT);
+
+	UI::TouchPadOutput touchOut;
+	UI::TouchController::PollInput(keys_held, touchOut);
+	if (touchOut.requestPause)
+	{
+		UI::RequestPause();
+		return;
+	}
+
+	u32 buttons = mpControllerConfig->GetN64ButtonsState(keys_held & ~KEY_SELECT) | touchOut.n64Buttons;
+	if (touchOut.swapSticks)
+	{
+		// Dual-Analog Shooter mode: Touch Stick drives N64 Main Stick,
+		// physical 3DS Circle Pad drives C-Buttons (strafe/movement).
+		pPad[0].stick_x = touchOut.analogX;
+		pPad[0].stick_y = touchOut.analogY;
+		if (circlepad.dx > 40)       buttons |= R_CBUTTONS;
+		else if (circlepad.dx < -40) buttons |= L_CBUTTONS;
+		if (circlepad.dy > 40)       buttons |= U_CBUTTONS;
+		else if (circlepad.dy < -40) buttons |= D_CBUTTONS;
+	}
+	else
+	{
+		pPad[0].stick_x = circlepad.dx / 2;
+		pPad[0].stick_y = circlepad.dy / 2;
+	}
+	pPad[0].button = buttons;
 }
 
 template<> bool	CSingleton< CInputManager >::Create()

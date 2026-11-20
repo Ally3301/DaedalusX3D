@@ -19,6 +19,7 @@
 #include "Utility/VolatileMem.h"
 
 #include "SysCTR/UI/InGameMenu.h"
+#include "SysCTR/UI/TouchControllerCTR.h"
 #include "SysCTR/UI/UserInterface.h"
 
 extern void HandleEndOfFrame();
@@ -244,18 +245,26 @@ void IGraphicsContext::UpdateFrame(bool wait_for_vbl)
 
 	// Close the citro3d gameplay frame before the pause menu runs its own UI frame loop.
 	if (UI::IsCapturingInput())
+	{
 		Citro3D::EndGameFrame();
+		// Ensure the top LCD framebuffer transfer finishes so Pause captures a clean frame.
+		C3D_FrameSync();
+	}
 
 	if (UI::DrawInGameMenu())
 	{
 		ResetVertexBuffer();
+		UI::TouchController::MarkDirty();
 		newFrame = true;
 		PerfCTR::Reset();
 		return;
 	}
 
-	// Present top screen only (bottom target was not drawn on, so citro3d skips
-	// transferring the idle bottom screen — saving a full 320x240 DMA every frame).
+	// Draw the interactive bottom-screen extension controls ONLY when dirty (touch
+	// change or 2 Hz FPS/battery refresh). Idle frames skip sBotTarget with 0 DMA cost!
+	UI::TouchController::RenderBottomIfDirty();
+
+	// Submit top screen (and bottom screen if touched/dirty) in one single command list.
 	Citro3D::EndGameFrame();
 
 	// Alternate between two linear vertex banks per frame so CPU writes to the

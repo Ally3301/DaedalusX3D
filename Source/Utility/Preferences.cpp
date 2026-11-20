@@ -42,10 +42,10 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "Utility/Translate.h"
 #endif
 
-// CTR runs Audio_Ucode synchronously on Old 3DS (matching upstream DaedalusX64)
-// to avoid SP task-yield freezes and Core 1 syscore starvation.
+// CTR offloads Audio_Ucode to Core 1 (Old 3DS) / Core 2 (New 3DS) asynchronously
+// with zero-stall deferred AddBuffer handoff for single-buffered games.
 #if defined(DAEDALUS_CTR)
-static const EAudioPluginMode      kDefaultAudioPluginMode      = APM_ENABLED_SYNC;
+static const EAudioPluginMode      kDefaultAudioPluginMode      = APM_ENABLED_ASYNC;
 // Hashing every cached texture every frame costs a large amount of ARM11 time.
 // Eight-frame checks retain animated texture support with much lower overhead.
 static const ETextureHashFrequency kDefaultTextureHashFrequency = THF_EVERY_8;

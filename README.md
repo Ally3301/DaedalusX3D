@@ -2,14 +2,26 @@
 
 🌐 **Languages:** **English** | [Português (Brasil)](README.pt-BR.md)
 
-A fork of **DaedalusX64** focused and tuned specifically for **Nintendo 3DS Old / 2DS** (`ARMv6K` ARM11 MPCore @ 268 MHz, VFPv2, 16 KB L1 I/D-cache, 6 MiB VRAM, PICA200), featuring a native **`citro3d` / PICA200** graphics backend and dual-screen frontend inspired by PSX3D.
+A fork of **DaedalusX64** focused and tuned specifically for **Nintendo 3DS Old / 2DS** (`ARMv6K` ARM11 MPCore @ 268 MHz, VFPv2, 16 KB L1 I/D-cache, 6 MiB VRAM, PICA200), featuring a native **`citro3d` / PICA200** graphics backend, a modern 3DS-native dual-screen frontend, automatic box-art scraping, and interactive bottom-screen extension controls during gameplay.
 
 ---
 
-## Current Status & Performance (Old 3DS — `v0.1.0-Stable`)
+## Screenshots
 
-- **Super Smash Bros. & Mario Kart 64**: playable on **Old 3DS** even with **no frameskip** and clean audio enabled.
-- **Frontend**: dual-screen UI in native `citro3d` (touch list + action bar on the bottom screen, cover carousel/details on the top screen), with live theme switching between **Original (PSX3D)** and **N64 Classic** via `L` / `R`, and clean Home Menu exit on `.cia` installs.
+| ROM Browser (Dual-Screen) | In-Game Touch Extension (`C-Cross` + `Z`) | Pause Menu (Frozen Game Backdrop) |
+| :---: | :---: | :---: |
+| ![ROM Browser](docs/screenshots/rom-browser.png) | ![In-Game Touch Controls](docs/screenshots/gameplay-touch-controls.jpg) | ![Pause Menu](docs/screenshots/pause-menu.jpg) |
+
+---
+
+## Current Status & Performance (Old 3DS)
+
+- **High Compatibility & Speed**: *Super Mario 64*, *Mario Kart 64*, *Diddy Kong Racing*, *Super Smash Bros.*, *GoldenEye 007*, *The Legend of Zelda: Ocarina of Time*, and *Pokemon Stadium* run at full or near-full native N64 speed with clean async audio.
+- **3DS-Native Dual-Screen Frontend (`citro3d`)**:
+  - **Proportional Roboto typography & single-atlas SDF UI**: crisp rounded cards, smooth 2D spring focus animations, system clock & battery status, and 1-tap **Light / Dark** theme toggle via `Y` (plus *Midnight* and *Stealth* themes).
+  - **Automatic Box-Art Scraper**: automatically downloads missing N64 covers over 3DS Wi-Fi (`httpc` + `libretro-thumbnails`) in a low-priority background thread and saves compact `128×128` PNGs to `sdmc:/3ds/DaedalusX64/Resources/Preview/`.
+  - **Interactive In-Game Bottom Screen**: acts as a physical control extension for missing Old 3DS inputs (**4-way yellow N64 C-Buttons Cross** by default, **Virtual C-Stick Camera**, **Dual-Analog Shooter** stick-swap, **N64 D-Pad**, dedicated **Z Trigger** + **Z-Lock**, hold-guarded **Quick Save / Quick Load**, live FPS/mute/battery bar, and **Sleep** battery-saver mode) with *dirty-driven* rendering (zero GPU/DMA overhead on idle frames).
+  - **Frosted Pause Overlay**: captures the live N64 top screen behind an animated translucent banner alongside a CTR64-inspired 3×3 pause grid (`Resume`, `Save`, `Load`, `Slot 0–4`, `Audio`, `Video`, `Controls`, `Reset`, `Game list`, `Exit`).
 - **Implemented Optimizations** (see full details in [CHANGELOG.md](CHANGELOG.md)):
   - **Native `citro3d` / PICA200 Backend**: unified GX command queue, 6-stage hardware TEV combiner (`PicaTEVCombiner`), `GPU_TRIANGLES` draw batching, fast-state cache, hardware `GX_MemoryFill` clears, and `FastInvSqrtCTR` vertex lighting.
   - **ARMv6K DynaRec**: selective per-range fragment invalidation (eliminating full cache flushes on small dynamic overlays), 4096-entry direct-mapped indirect jump table (`gIndirectJumpTable`), inlined delay slots for branch-likely exits, lazy 64-bit sign extension, 7 cached ARM GPRs, native `BGEZAL`/`BLTZAL`/`DIV`/`DIVU`, direct VFP `VLDR`/`VSTR` (`LWC1`/`SWC1`/`LDC1`/`SDC1`), and constant folding.
@@ -60,9 +72,14 @@ sdmc:/
 > If you install **`DaedalusX64.cia`** via **FBI**, the ROMs directory remains the same: `sdmc:/3ds/DaedalusX64/Roms/`.
 
 ### 3. Controls
-- **`SELECT`**: opens the in-game pause menu (Frameskip, Audio, CPU Speed Hack, Viewport, Save/Load State).
-- **`L` / `R`** (in the main menu): switches between `Original (PSX3D)` and `N64 Classic` themes.
-- **Circle Pad**: N64 analog stick | **D-Pad / Buttons**: per-ROM configurable mapping.
+- **`SELECT` or Bottom-Screen `☰` Button**: opens the in-game pause menu (Save/Load States, Audio, Video/ROM Options, Touch Controls, Reset, Game List, Exit).
+- **Bottom Screen (In-Game)**:
+  - **Yellow C-Cross (default)** / **C-Stick Camera** / **Dual-Analog Shooter** / **N64 D-Pad** / **Sleep**: tap the mode pill on the top HUD strip to switch live, or customize handedness, deadzone, sensitivity, and `Z-Lock` in **Pause → Controls**.
+  - **Dedicated `Z` Trigger & `Z-Lock`**: ergonomic access to N64 `Z` on Old 3DS.
+  - **Quick Save / Quick Load**: hold for `0.35s` to prevent accidental taps.
+- **`Y` (in menus)**: instantly toggles between **Dark** and **Light** 3DS themes.
+- **`L` / `R` (in ROM Browser)**: cycles sorting (`A-Z`, `Favorites`, `Size`) | **`SELECT`**: toggles Favorite.
+- **Circle Pad**: N64 analog stick (or C-Buttons strafe when `Dual-Analog Shooter` mode is active).
 
 ---
 

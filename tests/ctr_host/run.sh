@@ -14,5 +14,9 @@ trap 'rm -rf -- "$build_dir"' EXIT HUP INT TERM
     "$root/tests/ctr_host/test_ctr_host.cpp" \
     "$root/Source/SysCTR/Utility/ThreadCTR.cpp" \
     "$root/Source/SysCTR/Utility/TimingCTR.cpp" \
+    "$root/Source/SysCTR/UI/UITheme.cpp" \
+    "$root/Source/SysCTR/UI/UITouchInput.cpp" \
+    "$root/Source/SysCTR/UI/TouchControllerCTR.cpp" \
+    "$root/Source/SysCTR/UI/CoverScraperCTR.cpp" \
     ${LDFLAGS:-} -o "$build_dir/ctr_host_tests"
 "$build_dir/ctr_host_tests"

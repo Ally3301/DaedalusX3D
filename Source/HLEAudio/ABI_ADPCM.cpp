@@ -210,239 +210,127 @@ void ADPCM2(AudioHLECommand command)
 
 }
 
+static inline void ADPCM3_Predict8( s32 & l1, s32 & l2, const s32 * __restrict inp, const s16 * __restrict book1, const s16 * __restrict book2, s16 * __restrict out )
+{
+	const s32 b20 = book2[0], b21 = book2[1], b22 = book2[2], b23 = book2[3];
+	const s32 b24 = book2[4], b25 = book2[5], b26 = book2[6], b27 = book2[7];
+	const s32 i0 = inp[0], i1 = inp[1], i2 = inp[2], i3 = inp[3];
+	const s32 i4 = inp[4], i5 = inp[5], i6 = inp[6], i7 = inp[7];
+
+	const s32 a0 = book1[0]*l1 + b20*l2 + (i0 << 11);
+	const s32 a1 = book1[1]*l1 + b21*l2 + b20*i0 + (i1 << 11);
+	const s32 a2 = book1[2]*l1 + b22*l2 + b21*i0 + b20*i1 + (i2 << 11);
+	const s32 a3 = book1[3]*l1 + b23*l2 + b22*i0 + b21*i1 + b20*i2 + (i3 << 11);
+	const s32 a4 = book1[4]*l1 + b24*l2 + b23*i0 + b22*i1 + b21*i2 + b20*i3 + (i4 << 11);
+	const s32 a5 = book1[5]*l1 + b25*l2 + b24*i0 + b23*i1 + b22*i2 + b21*i3 + b20*i4 + (i5 << 11);
+	const s32 a6 = book1[6]*l1 + b26*l2 + b25*i0 + b24*i1 + b23*i2 + b22*i3 + b21*i4 + b20*i5 + (i6 << 11);
+	const s32 a7 = book1[7]*l1 + b27*l2 + b26*i0 + b25*i1 + b24*i2 + b23*i3 + b22*i4 + b21*i5 + b20*i6 + (i7 << 11);
+
+	out[0] = Saturate<s16>( a1 >> 11 );
+	out[1] = Saturate<s16>( a0 >> 11 );
+	out[2] = Saturate<s16>( a3 >> 11 );
+	out[3] = Saturate<s16>( a2 >> 11 );
+	out[4] = Saturate<s16>( a5 >> 11 );
+	out[5] = Saturate<s16>( a4 >> 11 );
+	const s16 s7 = Saturate<s16>( a7 >> 11 );
+	const s16 s6 = Saturate<s16>( a6 >> 11 );
+	out[6] = s7;
+	out[7] = s6;
+	l2 = s7;
+	l1 = s6;
+}
+
 void ADPCM3(AudioHLECommand command)
 {
-  u8 Flags=(u8)(command.cmd1>>0x1c)&0xff;
-  	//u16 Gain=(u16)(command.cmd0&0xffff);
-  	u32 Address=(command.cmd0 & 0xffffff);// + gAudioHLEState.Segments[(command.cmd1>>24)&0xf];
-  	u32 inPtr=(command.cmd1>>12)&0xf;
-  	//s16 *out=(s16 *)(testbuff+(gAudioHLEState.OutBuffer>>2));
-  	s16 *out=(s16 *)(gAudioHLEState.Buffer+(command.cmd1&0xfff)+0x4f0);
-  	//u8 *in=(u8 *)(gAudioHLEState.Buffer+((command.cmd1>>12)&0xf)+0x4f0);
-  	s16 count=(s16)((command.cmd1 >> 16)&0xfff);
-  	u8 icode;
-  	u8 code;
-  	s32 vscale;
-  	u16 index;
-  	u16 j;
-  	s32 a[8];
-  	s16 *book1,*book2;
+	u8 Flags=(u8)(command.cmd1>>0x1c)&0xff;
+	u32 Address=(command.cmd0 & 0xffffff);
+	u32 inPtr=(command.cmd1>>12)&0xf;
+	s16 *out=(s16 *)(gAudioHLEState.Buffer+(command.cmd1&0xfff)+0x4f0);
+	s16 count=(s16)((command.cmd1 >> 16)&0xfff);
+	const u8 * __restrict buf = gAudioHLEState.Buffer;
 
-  	memset(out,0,32);
+	if(Flags&0x1)
+	{
+		memset(out,0,32);
+	}
+	else
+	{
+		memmove(out,&rdram[(Flags&0x2) ? gAudioHLEState.LoopVal : Address],32);
+	}
 
-  	if(!(Flags&0x1))
-  	{
-  		memmove(out,&rdram[(Flags&0x2) ? gAudioHLEState.LoopVal : Address],32);
-  	}
+	s32 l1=out[15];
+	s32 l2=out[14];
+	s32 inp1[8];
+	s32 inp2[8];
+	out+=16;
+	while(count>0)
+	{
+		const u8 hdr = buf[(0x4f0+inPtr)^3];
+		inPtr++;
+		const u16 index = (u16)((hdr & 0xf) << 4);
+		const s16 * __restrict book1 = (const s16 *)&gAudioHLEState.ADPCMTable[index];
+		const s16 * __restrict book2 = book1 + 8;
+		const u8 code = hdr >> 4;
 
-  	s32 l1=out[15];
-  	s32 l2=out[14];
-  	s32 inp1[8];
-  	s32 inp2[8];
-  	out+=16;
-  	while(count>0)
-  	{
-  													// the first interation through, these values are
-  													// either 0 in the case of A_INIT, from a special
-  													// area of memory in the case of A_LOOP or just
-  													// the values we calculated the last time
+		const u32 b0 = buf[(0x4f0+inPtr+0)^3];
+		const u32 b1 = buf[(0x4f0+inPtr+1)^3];
+		const u32 b2 = buf[(0x4f0+inPtr+2)^3];
+		const u32 b3 = buf[(0x4f0+inPtr+3)^3];
+		const u32 b4 = buf[(0x4f0+inPtr+4)^3];
+		const u32 b5 = buf[(0x4f0+inPtr+5)^3];
+		const u32 b6 = buf[(0x4f0+inPtr+6)^3];
+		const u32 b7 = buf[(0x4f0+inPtr+7)^3];
+		inPtr += 8;
 
-  		code=gAudioHLEState.Buffer[(0x4f0+inPtr)^3];
-  		index=code&0xf;
-  		index<<=4;									// index into the adpcm code table
-  		book1=(s16 *)&gAudioHLEState.ADPCMTable[index];
-  		book2=book1+8;
-  		code>>=4;									// upper nibble is scale
-  		vscale=(0x8000>>((12-code)-1));				// very strange. 0x8000 would be .5 in 16:16 format
-  													// so this appears to be a fractional scale based
-  													// on the 12 based inverse of the scale value.  note
-  													// that this could be negative, in which case we do
-  													// not use the calculated vscale value... see the
-  													// if(code>12) check below
+		if (code < 12)
+		{
+			const u32 rsh = 12u - code;
+			inp1[0] = ((s32)(s16)((b0 & 0xf0u) << 8)) >> rsh;
+			inp1[1] = ((s32)(s16)((b0 & 0x0fu) << 12)) >> rsh;
+			inp1[2] = ((s32)(s16)((b1 & 0xf0u) << 8)) >> rsh;
+			inp1[3] = ((s32)(s16)((b1 & 0x0fu) << 12)) >> rsh;
+			inp1[4] = ((s32)(s16)((b2 & 0xf0u) << 8)) >> rsh;
+			inp1[5] = ((s32)(s16)((b2 & 0x0fu) << 12)) >> rsh;
+			inp1[6] = ((s32)(s16)((b3 & 0xf0u) << 8)) >> rsh;
+			inp1[7] = ((s32)(s16)((b3 & 0x0fu) << 12)) >> rsh;
 
-  		inPtr++;									// coded adpcm data lies next
-  		j=0;
-  		while(j<8)									// loop of 8, for 8 coded nibbles from 4 bytes
-  													// which yields 8 s16 pcm values
-  		{
-  			icode=gAudioHLEState.Buffer[(0x4f0+inPtr)^3];
-  			inPtr++;
+			inp2[0] = ((s32)(s16)((b4 & 0xf0u) << 8)) >> rsh;
+			inp2[1] = ((s32)(s16)((b4 & 0x0fu) << 12)) >> rsh;
+			inp2[2] = ((s32)(s16)((b5 & 0xf0u) << 8)) >> rsh;
+			inp2[3] = ((s32)(s16)((b5 & 0x0fu) << 12)) >> rsh;
+			inp2[4] = ((s32)(s16)((b6 & 0xf0u) << 8)) >> rsh;
+			inp2[5] = ((s32)(s16)((b6 & 0x0fu) << 12)) >> rsh;
+			inp2[6] = ((s32)(s16)((b7 & 0xf0u) << 8)) >> rsh;
+			inp2[7] = ((s32)(s16)((b7 & 0x0fu) << 12)) >> rsh;
+		}
+		else
+		{
+			inp1[0] = (s16)((b0 & 0xf0u) << 8);
+			inp1[1] = (s16)((b0 & 0x0fu) << 12);
+			inp1[2] = (s16)((b1 & 0xf0u) << 8);
+			inp1[3] = (s16)((b1 & 0x0fu) << 12);
+			inp1[4] = (s16)((b2 & 0xf0u) << 8);
+			inp1[5] = (s16)((b2 & 0x0fu) << 12);
+			inp1[6] = (s16)((b3 & 0xf0u) << 8);
+			inp1[7] = (s16)((b3 & 0x0fu) << 12);
 
-  			inp1[j]=(s16)((icode&0xf0)<<8);			// this will in effect be signed
+			inp2[0] = (s16)((b4 & 0xf0u) << 8);
+			inp2[1] = (s16)((b4 & 0x0fu) << 12);
+			inp2[2] = (s16)((b5 & 0xf0u) << 8);
+			inp2[3] = (s16)((b5 & 0x0fu) << 12);
+			inp2[4] = (s16)((b6 & 0xf0u) << 8);
+			inp2[5] = (s16)((b6 & 0x0fu) << 12);
+			inp2[6] = (s16)((b7 & 0xf0u) << 8);
+			inp2[7] = (s16)((b7 & 0x0fu) << 12);
+		}
 
-  			// Conker and Banjo set this!
-  			if(code<12)
-  				inp1[j]=((s32)((s32)inp1[j]*(s32)vscale)>>16);
-
-  			j++;
-
-  			inp1[j]=(s16)((icode&0xf)<<12);
-
-  			inp1[j]=((s32)((s32)inp1[j]*(s32)vscale)>>16);
-  			j++;
-  		}
-
-  		j=0;
-  		while(j<8)
-  		{
-  			icode=gAudioHLEState.Buffer[(0x4f0+inPtr)^3];
-  			inPtr++;
-
-  			inp2[j]=(s16)((icode&0xf0)<<8);			// this will in effect be signed
-
-  			if(code<12)
-  				inp2[j]=((s32)((s32)inp2[j]*(s32)vscale)>>16);
-
-  			j++;
-
-  			inp2[j]=(s16)((icode&0xf)<<12);
-
-  			inp2[j]=((s32)((s32)inp2[j]*(s32)vscale)>>16);
-  			j++;
-  		}
-
-  		a[0]= (s32)book1[0]*(s32)l1;
-  		a[0]+=(s32)book2[0]*(s32)l2;
-  		a[0]+=(s32)inp1[0]*(s32)2048;
-
-  		a[1] =(s32)book1[1]*(s32)l1;
-  		a[1]+=(s32)book2[1]*(s32)l2;
-  		a[1]+=(s32)book2[0]*inp1[0];
-  		a[1]+=(s32)inp1[1]*(s32)2048;
-
-  		a[2] =(s32)book1[2]*(s32)l1;
-  		a[2]+=(s32)book2[2]*(s32)l2;
-  		a[2]+=(s32)book2[1]*inp1[0];
-  		a[2]+=(s32)book2[0]*inp1[1];
-  		a[2]+=(s32)inp1[2]*(s32)2048;
-
-  		a[3] =(s32)book1[3]*(s32)l1;
-  		a[3]+=(s32)book2[3]*(s32)l2;
-  		a[3]+=(s32)book2[2]*inp1[0];
-  		a[3]+=(s32)book2[1]*inp1[1];
-  		a[3]+=(s32)book2[0]*inp1[2];
-  		a[3]+=(s32)inp1[3]*(s32)2048;
-
-  		a[4] =(s32)book1[4]*(s32)l1;
-  		a[4]+=(s32)book2[4]*(s32)l2;
-  		a[4]+=(s32)book2[3]*inp1[0];
-  		a[4]+=(s32)book2[2]*inp1[1];
-  		a[4]+=(s32)book2[1]*inp1[2];
-  		a[4]+=(s32)book2[0]*inp1[3];
-  		a[4]+=(s32)inp1[4]*(s32)2048;
-
-  		a[5] =(s32)book1[5]*(s32)l1;
-  		a[5]+=(s32)book2[5]*(s32)l2;
-  		a[5]+=(s32)book2[4]*inp1[0];
-  		a[5]+=(s32)book2[3]*inp1[1];
-  		a[5]+=(s32)book2[2]*inp1[2];
-  		a[5]+=(s32)book2[1]*inp1[3];
-  		a[5]+=(s32)book2[0]*inp1[4];
-  		a[5]+=(s32)inp1[5]*(s32)2048;
-
-  		a[6] =(s32)book1[6]*(s32)l1;
-  		a[6]+=(s32)book2[6]*(s32)l2;
-  		a[6]+=(s32)book2[5]*inp1[0];
-  		a[6]+=(s32)book2[4]*inp1[1];
-  		a[6]+=(s32)book2[3]*inp1[2];
-  		a[6]+=(s32)book2[2]*inp1[3];
-  		a[6]+=(s32)book2[1]*inp1[4];
-  		a[6]+=(s32)book2[0]*inp1[5];
-  		a[6]+=(s32)inp1[6]*(s32)2048;
-
-  		a[7] =(s32)book1[7]*(s32)l1;
-  		a[7]+=(s32)book2[7]*(s32)l2;
-  		a[7]+=(s32)book2[6]*inp1[0];
-  		a[7]+=(s32)book2[5]*inp1[1];
-  		a[7]+=(s32)book2[4]*inp1[2];
-  		a[7]+=(s32)book2[3]*inp1[3];
-  		a[7]+=(s32)book2[2]*inp1[4];
-  		a[7]+=(s32)book2[1]*inp1[5];
-  		a[7]+=(s32)book2[0]*inp1[6];
-  		a[7]+=(s32)inp1[7]*(s32)2048;
-
-  		*(out++) =      Saturate<s16>( a[1] >> 11 );
-  		*(out++) =      Saturate<s16>( a[0] >> 11 );
-  		*(out++) =      Saturate<s16>( a[3] >> 11 );
-  		*(out++) =      Saturate<s16>( a[2] >> 11 );
-  		*(out++) =      Saturate<s16>( a[5] >> 11 );
-  		*(out++) =      Saturate<s16>( a[4] >> 11 );
-  		*(out++) = l2 = Saturate<s16>( a[7] >> 11 );
-  		*(out++) = l1 = Saturate<s16>( a[6] >> 11 );
-
-  		a[0]= (s32)book1[0]*(s32)l1;
-  		a[0]+=(s32)book2[0]*(s32)l2;
-  		a[0]+=(s32)inp2[0]*(s32)2048;
-
-  		a[1] =(s32)book1[1]*(s32)l1;
-  		a[1]+=(s32)book2[1]*(s32)l2;
-  		a[1]+=(s32)book2[0]*inp2[0];
-  		a[1]+=(s32)inp2[1]*(s32)2048;
-
-  		a[2] =(s32)book1[2]*(s32)l1;
-  		a[2]+=(s32)book2[2]*(s32)l2;
-  		a[2]+=(s32)book2[1]*inp2[0];
-  		a[2]+=(s32)book2[0]*inp2[1];
-  		a[2]+=(s32)inp2[2]*(s32)2048;
-
-  		a[3] =(s32)book1[3]*(s32)l1;
-  		a[3]+=(s32)book2[3]*(s32)l2;
-  		a[3]+=(s32)book2[2]*inp2[0];
-  		a[3]+=(s32)book2[1]*inp2[1];
-  		a[3]+=(s32)book2[0]*inp2[2];
-  		a[3]+=(s32)inp2[3]*(s32)2048;
-
-  		a[4] =(s32)book1[4]*(s32)l1;
-  		a[4]+=(s32)book2[4]*(s32)l2;
-  		a[4]+=(s32)book2[3]*inp2[0];
-  		a[4]+=(s32)book2[2]*inp2[1];
-  		a[4]+=(s32)book2[1]*inp2[2];
-  		a[4]+=(s32)book2[0]*inp2[3];
-  		a[4]+=(s32)inp2[4]*(s32)2048;
-
-  		a[5] =(s32)book1[5]*(s32)l1;
-  		a[5]+=(s32)book2[5]*(s32)l2;
-  		a[5]+=(s32)book2[4]*inp2[0];
-  		a[5]+=(s32)book2[3]*inp2[1];
-  		a[5]+=(s32)book2[2]*inp2[2];
-  		a[5]+=(s32)book2[1]*inp2[3];
-  		a[5]+=(s32)book2[0]*inp2[4];
-  		a[5]+=(s32)inp2[5]*(s32)2048;
-
-  		a[6] =(s32)book1[6]*(s32)l1;
-  		a[6]+=(s32)book2[6]*(s32)l2;
-  		a[6]+=(s32)book2[5]*inp2[0];
-  		a[6]+=(s32)book2[4]*inp2[1];
-  		a[6]+=(s32)book2[3]*inp2[2];
-  		a[6]+=(s32)book2[2]*inp2[3];
-  		a[6]+=(s32)book2[1]*inp2[4];
-  		a[6]+=(s32)book2[0]*inp2[5];
-  		a[6]+=(s32)inp2[6]*(s32)2048;
-
-  		a[7] =(s32)book1[7]*(s32)l1;
-  		a[7]+=(s32)book2[7]*(s32)l2;
-  		a[7]+=(s32)book2[6]*inp2[0];
-  		a[7]+=(s32)book2[5]*inp2[1];
-  		a[7]+=(s32)book2[4]*inp2[2];
-  		a[7]+=(s32)book2[3]*inp2[3];
-  		a[7]+=(s32)book2[2]*inp2[4];
-  		a[7]+=(s32)book2[1]*inp2[5];
-  		a[7]+=(s32)book2[0]*inp2[6];
-  		a[7]+=(s32)inp2[7]*(s32)2048;
-
-  		*(out++) =      Saturate<s16>( a[1] >> 11 );
-  		*(out++) =      Saturate<s16>( a[0] >> 11 );
-  		*(out++) =      Saturate<s16>( a[3] >> 11 );
-  		*(out++) =      Saturate<s16>( a[2] >> 11 );
-  		*(out++) =      Saturate<s16>( a[5] >> 11 );
-  		*(out++) =      Saturate<s16>( a[4] >> 11 );
-  		*(out++) = l2 = Saturate<s16>( a[7] >> 11 );
-  		*(out++) = l1 = Saturate<s16>( a[6] >> 11 );
-
-  		count-=32;
-  	}
-  	out-=16;
-  	memmove(&rdram[Address],out,32);
+		ADPCM3_Predict8( l1, l2, inp1, book1, book2, out );
+		ADPCM3_Predict8( l1, l2, inp2, book1, book2, out + 8 );
+		out += 16;
+		count -= 32;
+	}
+	out-=16;
+	memmove(&rdram[Address],out,32);
 }
 
 void LOADADPCM(AudioHLECommand command)

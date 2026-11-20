@@ -172,7 +172,7 @@ void ENVMIXER3(AudioHLECommand command)
   	s32 MainL;
   	s32 AuxR;
   	s32 AuxL;
-  	s32 i1,o1,a1,a2,a3;
+  	s32 i1;
 
   	s32 LAdder, LAcc, LVol;
   	s32 RAdder, RAcc, RVol;
@@ -225,77 +225,84 @@ void ENVMIXER3(AudioHLECommand command)
   	//	aux2=aux3=zero;
   	//}
 
-  	for (s32 y = 0; y < (0x170/2); y++) {
+  	// Hoist constant ramp direction & Wet==0 checks outside the 184-sample inner loop.
+  	const bool rampLPos = (LSig >= 0);
+  	const bool rampRPos = (RSig >= 0);
+  	const bool hasWet   = (Wet != 0);
+  	const bool staticVol = (LAdder == 0 && RAdder == 0);
+  	const s32  dry32 = Dry;
+  	const s32  wet32 = Wet;
 
-  		// Left
-  		LAcc += LAdder;
-  		LVol += (LAcc >> 16);
-  		LAcc &= 0xFFFF;
+  	if (staticVol)
+  	{
+  		if (rampLPos) { if (LVol > LTrg) LVol = LTrg; }
+  		else          { if (LVol < LTrg) LVol = LTrg; }
+  		if (rampRPos) { if (RVol > RTrg) RVol = RTrg; }
+  		else          { if (RVol < RTrg) RVol = RTrg; }
 
-  		// Right
-  		RAcc += RAdder;
-  		RVol += (RAcc >> 16);
-  		RAcc &= 0xFFFF;
-  // ****************************************************************
-  		// Clamp Left
-  		if (LSig >= 0) { // VLT
-  			if (LVol > LTrg) {
-  				LVol = LTrg;
-  			}
-  		} else { // VGE
-  			if (LVol < LTrg) {
-  				LVol = LTrg;
-  			}
-  		}
+  		MainL = ((dry32 * LVol) + 0x4000) >> 15;
+  		MainR = ((dry32 * RVol) + 0x4000) >> 15;
 
-  		// Clamp Right
-  		if (RSig >= 0) { // VLT
-  			if (RVol > RTrg) {
-  				RVol = RTrg;
-  			}
-  		} else { // VGE
-  			if (RVol < RTrg) {
-  				RVol = RTrg;
+  		if (!hasWet)
+  		{
+  			for (s32 y = 0; y < (0x170/2); y++)
+  			{
+  				const s32 idx = y ^ 1;
+  				i1 = inp[idx];
+  				out [idx] = Saturate<s16>( out [idx] + (((i1 * MainL) + 0x4000) >> 15) );
+  				aux1[idx] = Saturate<s16>( aux1[idx] + (((i1 * MainR) + 0x4000) >> 15) );
   			}
   		}
-  // ****************************************************************
-  		MainL = ((Dry * LVol) + 0x4000) >> 15;
-  		MainR = ((Dry * RVol) + 0x4000) >> 15;
-
-  		o1 = out [y^1];
-  		a1 = aux1[y^1];
-  		i1 = inp [y^1];
-
-  		o1+=((i1*MainL)+0x4000)>>15;
-  		a1+=((i1*MainR)+0x4000)>>15;
-
-  // ****************************************************************
-
-  		o1 = Saturate<s16>( o1 );
-  		a1 = Saturate<s16>( a1 );
-
-  // ****************************************************************
-
-  		out[y^1]=o1;
-  		aux1[y^1]=a1;
-
-  // ****************************************************************
-  		//if (!(flags&A_AUX)) {
-  			a2 = aux2[y^1];
-  			a3 = aux3[y^1];
-
-  			AuxL  = ((Wet * LVol) + 0x4000) >> 15;
-  			AuxR  = ((Wet * RVol) + 0x4000) >> 15;
-
-  			a2+=((i1*AuxL)+0x4000)>>15;
-  			a3+=((i1*AuxR)+0x4000)>>15;
-
-  			a2 = Saturate<s16>( a2 );
-  			a3 = Saturate<s16>( a3 );
-
-  			aux2[y^1]=a2;
-  			aux3[y^1]=a3;
+  		else
+  		{
+  			AuxL = ((wet32 * LVol) + 0x4000) >> 15;
+  			AuxR = ((wet32 * RVol) + 0x4000) >> 15;
+  			for (s32 y = 0; y < (0x170/2); y++)
+  			{
+  				const s32 idx = y ^ 1;
+  				i1 = inp[idx];
+  				out [idx] = Saturate<s16>( out [idx] + (((i1 * MainL) + 0x4000) >> 15) );
+  				aux1[idx] = Saturate<s16>( aux1[idx] + (((i1 * MainR) + 0x4000) >> 15) );
+  				aux2[idx] = Saturate<s16>( aux2[idx] + (((i1 * AuxL)  + 0x4000) >> 15) );
+  				aux3[idx] = Saturate<s16>( aux3[idx] + (((i1 * AuxR)  + 0x4000) >> 15) );
+  			}
   		}
+  	}
+  	else
+  	{
+  		for (s32 y = 0; y < (0x170/2); y++)
+  		{
+  			LAcc += LAdder;
+  			LVol += (LAcc >> 16);
+  			LAcc &= 0xFFFF;
+
+  			RAcc += RAdder;
+  			RVol += (RAcc >> 16);
+  			RAcc &= 0xFFFF;
+
+  			if (rampLPos) { if (LVol > LTrg) LVol = LTrg; }
+  			else          { if (LVol < LTrg) LVol = LTrg; }
+
+  			if (rampRPos) { if (RVol > RTrg) RVol = RTrg; }
+  			else          { if (RVol < RTrg) RVol = RTrg; }
+
+  			MainL = ((dry32 * LVol) + 0x4000) >> 15;
+  			MainR = ((dry32 * RVol) + 0x4000) >> 15;
+
+  			const s32 idx = y ^ 1;
+  			i1 = inp[idx];
+  			out [idx] = Saturate<s16>( out [idx] + (((i1 * MainL) + 0x4000) >> 15) );
+  			aux1[idx] = Saturate<s16>( aux1[idx] + (((i1 * MainR) + 0x4000) >> 15) );
+
+  			if (hasWet)
+  			{
+  				AuxL = ((wet32 * LVol) + 0x4000) >> 15;
+  				AuxR = ((wet32 * RVol) + 0x4000) >> 15;
+  				aux2[idx] = Saturate<s16>( aux2[idx] + (((i1 * AuxL) + 0x4000) >> 15) );
+  				aux3[idx] = Saturate<s16>( aux3[idx] + (((i1 * AuxR) + 0x4000) >> 15) );
+  			}
+  		}
+  	}
   	//}
 
   	*(s16 *)(buff +  0) = Wet; // 0-1
