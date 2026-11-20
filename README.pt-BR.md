@@ -2,22 +2,24 @@
 
 🌐 **Idiomas:** [English](README.md) | **Português (Brasil)**
 
-Fork do **DaedalusX64** focado e otimizado especificamente para **Nintendo 3DS Old / 2DS** (`ARMv6K` ARM11 MPCore @ 268 MHz, VFPv2, 16 KB L1 I/D-cache, 6 MiB VRAM, PICA200), com frontend em `picaGL` puro inspirado no PSX3D.
+Fork do **DaedalusX64** focado e otimizado especificamente para **Nintendo 3DS Old / 2DS** (`ARMv6K` ARM11 MPCore @ 268 MHz, VFPv2, 16 KB L1 I/D-cache, 6 MiB VRAM, PICA200), com backend gráfico nativo em **`citro3d` / PICA200** e frontend de duas telas inspirado no PSX3D.
 
 ---
 
-## Status Atual & Desempenho (Old 3DS)
+## Status Atual & Desempenho (Old 3DS — `v0.1.0-Stable`)
 
-- **Mario Kart 64**: rodando entre **25 e 30 FPS** no Old 3DS com áudio ativo (apresentando apenas alguns *stutterings* pontuais).
-- **Frontend**: interface de duas telas em `picaGL` puro (lista touch + barra de ações na tela inferior, carrossel/capas na tela superior), com troca de tema entre **Original (PSX3D)** e **N64 Classic** via `L` / `R`.
-- **Otimizações implementadas**:
-  - **DynaRec ARMv6K**: acesso direto em RDRAM para endereços constantes (`LUI + LW/SW/...`), codegen nativo para `SRL`, shifts 64-bit (`DSLL`/`DSRL`/`DSRA`), `BC1F`/`BC1T`, `CVT.S.W`/`CVT.D.W`/`CVT.W`/`ROUND.W` e correção de alocação em `ExpireOldIntervals()`.
-  - **Pipeline 3D (VFPv2)**: transformação de vértices e multiplicação de matrizes 4×4 em assembly **VFPv2 `LEN=4`**, fusão de escala UV em `PrepareTrisUnclipped()`, zero-malloc em `TempVerts`, cache de estados GL e cache de blend modes.
-  - **Texturas & VRAM**: decodificação direta de texturas `CI4`/`CI8` (`RGBA16`) para `RGBA5551` nativo (metade da VRAM e 2× menos banda/swizzle).
-  - **Áudio HLE**: saturação em 1 ciclo via instrução `SSAT` ARMv6, `ENVMIXER2` sem branch interno, ring buffer em blocos contíguos e suavização sutil de taxa (`41454–44100 Hz`).
+- **Super Smash Bros. & Mario Kart 64**: jogáveis no **Old 3DS** mesmo **sem frameskip** e com áudio limpo ativo.
+- **Frontend**: interface de duas telas em `citro3d` nativo (lista touch + barra de ações na tela inferior, carrossel/capas na tela superior), com troca de tema entre **Original (PSX3D)** e **N64 Classic** via `L` / `R` e saída limpa para o Home Menu na versão `.cia`.
+- **Otimizações implementadas** (detalhes completos em [CHANGELOG.md](CHANGELOG.md)):
+  - **Backend Nativo `citro3d` / PICA200**: fila GX unificada, combiner TEV em hardware de 6 estágios (`PicaTEVCombiner`), batching de `GPU_TRIANGLES`, cache de estado rápido, clears em hardware via `GX_MemoryFill` e iluminação de vértices com `FastInvSqrtCTR`.
+  - **DynaRec ARMv6K**: invalidação seletiva por faixa no cache de fragmentos (eliminando resets totais em micro-overlays dinâmicos), tabela direta global de 4096 entradas para saltos indiretos (`gIndirectJumpTable`), inlining de delay slot em saídas *branch-likely*, extensão de sinal 64-bit lazy, 7 registradores ARM em cache, `BGEZAL`/`BLTZAL`/`DIV`/`DIVU` nativos, `VLDR`/`VSTR` direto em `LWC1`/`SWC1`/`LDC1`/`SDC1` e constant folding.
+  - **Pipeline 3D (VFPv2)**: transformação de vértices e multiplicação de matrizes 4×4 em assembly **VFPv2 `LEN=4`**, fusão de escala UV em `PrepareTrisUnclipped()` e decodificação direta `CI4`/`CI8` → `RGBA5551`.
+  - **Áudio HLE Assíncrono (Core 1 / Core 2)**: execução de `Audio_Ucode` em thread dedicada no Core 1 (syscore do Old 3DS) / Core 2 (New 3DS) com rastreamento exato de faixas de saída ABI1/ABI2/ABI3, saturação em 1 ciclo via `SSAT` e reprodução suave sem travar o Core 0.
 
 ### Roadmap
-- [ ] **Migração de backend gráfico (`picaGL` → `citro3d` / PICA200 nativo)**: planejada para eliminar a espera síncrona (`LightEvent_Wait`) no swap de buffers, habilitar *overlap* real entre CPU e GPU, utilizar estágios TEV em hardware (reduzindo multipass) e buscar 30 FPS estáveis sem *stutterings*.
+- [x] **Migração de backend gráfico (`picaGL` → `citro3d` / PICA200 nativo)** — entregue na `v0.1.0-Stable`.
+- [x] **Offload de áudio HLE no Core 1/2 e invalidação seletiva no DynaRec** — entregue na `v0.1.0-Stable`.
+- [ ] Mais otimizações de banda no Old 3DS e melhorias de compatibilidade por jogo.
 
 ---
 

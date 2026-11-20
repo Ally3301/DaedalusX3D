@@ -2,22 +2,24 @@
 
 🌐 **Languages:** **English** | [Português (Brasil)](README.pt-BR.md)
 
-A fork of **DaedalusX64** focused and tuned specifically for **Nintendo 3DS Old / 2DS** (`ARMv6K` ARM11 MPCore @ 268 MHz, VFPv2, 16 KB L1 I/D-cache, 6 MiB VRAM, PICA200), featuring a pure `picaGL` frontend inspired by PSX3D.
+A fork of **DaedalusX64** focused and tuned specifically for **Nintendo 3DS Old / 2DS** (`ARMv6K` ARM11 MPCore @ 268 MHz, VFPv2, 16 KB L1 I/D-cache, 6 MiB VRAM, PICA200), featuring a native **`citro3d` / PICA200** graphics backend and dual-screen frontend inspired by PSX3D.
 
 ---
 
-## Current Status & Performance (Old 3DS)
+## Current Status & Performance (Old 3DS — `v0.1.0-Stable`)
 
-- **Mario Kart 64**: currently running between **25 and 30 FPS** on Old 3DS with audio enabled (with occasional minor audio stutters).
-- **Frontend**: dual-screen UI in pure `picaGL` (touch list + action bar on the bottom screen, cover carousel/details on the top screen), with live theme switching between **Original (PSX3D)** and **N64 Classic** via `L` / `R`.
-- **Implemented Optimizations**:
-  - **ARMv6K DynaRec**: direct RDRAM loads/stores for statically known addresses (`LUI + LW/SW/...`), native codegen for `SRL`, 64-bit shifts (`DSLL`/`DSRL`/`DSRA`), `BC1F`/`BC1T`, `CVT.S.W`/`CVT.D.W`/`CVT.W`/`ROUND.W`, and register-leak fix in `ExpireOldIntervals()`.
-  - **3D Pipeline (VFPv2)**: hardware vector **VFPv2 `LEN=4`** assembly for vertex transformation and 4×4 matrix multiplication, UV scaling fused into `PrepareTrisUnclipped()`, zero-malloc `TempVerts` scratch buffer, GL state cache, and blend-mode cache.
-  - **Textures & VRAM**: direct decoding of `CI4`/`CI8` (`RGBA16`) textures to native `RGBA5551` (50% less VRAM usage and 2× lower swizzle/bandwidth cost).
-  - **HLE Audio**: 1-cycle hardware saturation via ARMv6 `SSAT`, branchless inner loop in `ENVMIXER2`, block-based `CAudioBuffer` ring writes, and subtle playback-rate smoothing (`41454–44100 Hz`).
+- **Super Smash Bros. & Mario Kart 64**: playable on **Old 3DS** even with **no frameskip** and clean audio enabled.
+- **Frontend**: dual-screen UI in native `citro3d` (touch list + action bar on the bottom screen, cover carousel/details on the top screen), with live theme switching between **Original (PSX3D)** and **N64 Classic** via `L` / `R`, and clean Home Menu exit on `.cia` installs.
+- **Implemented Optimizations** (see full details in [CHANGELOG.md](CHANGELOG.md)):
+  - **Native `citro3d` / PICA200 Backend**: unified GX command queue, 6-stage hardware TEV combiner (`PicaTEVCombiner`), `GPU_TRIANGLES` draw batching, fast-state cache, hardware `GX_MemoryFill` clears, and `FastInvSqrtCTR` vertex lighting.
+  - **ARMv6K DynaRec**: selective per-range fragment invalidation (eliminating full cache flushes on small dynamic overlays), 4096-entry direct-mapped indirect jump table (`gIndirectJumpTable`), inlined delay slots for branch-likely exits, lazy 64-bit sign extension, 7 cached ARM GPRs, native `BGEZAL`/`BLTZAL`/`DIV`/`DIVU`, direct VFP `VLDR`/`VSTR` (`LWC1`/`SWC1`/`LDC1`/`SDC1`), and constant folding.
+  - **3D Pipeline (VFPv2)**: hardware vector **VFPv2 `LEN=4`** assembly for vertex transformation and 4×4 matrix multiplication, UV scaling fused into `PrepareTrisUnclipped()`, and direct `CI4`/`CI8` → `RGBA5551` texture decoding.
+  - **Async HLE Audio (Core 1 / Core 2)**: offloads `Audio_Ucode` onto Core 1 (Old 3DS syscore) / Core 2 (New 3DS) with exact ABI1/ABI2/ABI3 double-buffer range tracking, 1-cycle ARMv6 `SSAT` saturation, and smooth ring-buffer playback.
 
 ### Roadmap
-- [ ] **Graphics backend migration (`picaGL` → `citro3d` / native PICA200)**: planned to eliminate the blocking `LightEvent_Wait` on buffer swaps, enable true CPU/GPU overlap, use hardware TEV stages (reducing multipass overhead), and target locked 30 FPS without stutters.
+- [x] **Graphics backend migration (`picaGL` → `citro3d` / native PICA200)** — shipped in `v0.1.0-Stable`.
+- [x] **Core 1/2 async HLE audio offload & selective DynaRec invalidation** — shipped in `v0.1.0-Stable`.
+- [ ] Further per-game compatibility and Old 3DS bandwidth tuning.
 
 ---
 
