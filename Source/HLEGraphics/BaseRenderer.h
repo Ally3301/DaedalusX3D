@@ -35,7 +35,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #elif defined(DAEDALUS_VITA)
 #include <vitaGL.h>
 #elif defined(DAEDALUS_CTR)
-#include <GL/picaGL.h>
+#include "SysCTR/Graphics/Citro3DContext.h"
 #else
 #include "SysGL/GL.h"
 #endif
@@ -254,7 +254,7 @@ public:
 	inline u32			GetTextureTile() const					{ return mTextureTile; }
 
 #ifdef DAEDALUS_CTR
-	inline void			SetCullMode(bool enable, bool mode)		{ enable ? glEnable(GL_CULL_FACE) : glDisable(GL_CULL_FACE); mode ? glCullFace(GL_BACK) : glCullFace(GL_FRONT); }
+	inline void			SetCullMode(bool enable, bool mode)		{ Citro3D::SetCullMode(enable, mode); }
 #else
 	inline void			SetCullMode(bool enable, bool mode)		{ mTnL.Flags.TriCull = enable; mTnL.Flags.CullBack = mode; }
 #endif
@@ -264,7 +264,10 @@ public:
 #ifdef DAEDALUS_PSP
 	inline void			SetFogMinMax(f32 fog_near, f32 fog_far)	{ sceGuFog(fog_near, fog_far, mFogColour.GetColour()); }
 	inline void			SetFogColour( c32 colour )				{ mFogColour = colour; }
-#elif defined(DAEDALUS_VITA) || defined (DAEDALUS_CTR)
+#elif defined(DAEDALUS_CTR)
+	inline void			SetFogMinMax(f32 fog_near, f32 fog_far)	{ Citro3D::SetFogMinMax(fog_near, fog_far); }
+	inline void			SetFogColour( c32 colour )				{ mFogColour = colour; Citro3D::SetFogColor(colour.GetColour()); }
+#elif defined(DAEDALUS_VITA)
 	inline void			SetFogMinMax(f32 fog_near, f32 fog_far)	{ glFogf(GL_FOG_START, fog_near); glFogf(GL_FOG_END, fog_far); }
 	inline void			SetFogColour( c32 colour )				{ float fog_clr[4] = {colour.GetRf(), colour.GetGf(), colour.GetBf(), colour.GetAf()}; glFogfv(GL_FOG_COLOR, &fog_clr[0]); }
 #endif
@@ -380,6 +383,9 @@ protected:
 	inline void			UpdateShadeModel()						{ sceGuShadeModel( mTnL.Flags.Shade ? GU_SMOOTH : GU_FLAT ); }
 #elif defined(DAEDALUS_VITA)
 	inline void			UpdateFogEnable()						{ if(gFogEnabled) mTnL.Flags.Fog ? glEnable(GL_FOG) : glDisable(GL_FOG); }
+	inline void			UpdateShadeModel() {}
+#elif defined(DAEDALUS_CTR)
+	inline void			UpdateFogEnable()						{ Citro3D::SetFogEnable(mTnL.Flags.Fog != 0); }
 	inline void			UpdateShadeModel() {}
 #else
 	inline void			UpdateFogEnable()						{ mTnL.Flags.Fog ? glEnable(GL_FOG) : glDisable(GL_FOG); }

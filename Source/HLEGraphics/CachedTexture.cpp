@@ -24,6 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 
 #include "Config/ConfigOptions.h"
+#include "Core/Memory.h"
 #include "Core/ROM.h"
 #include "Debug/DBGConsole.h"
 #include "Debug/Dump.h"
@@ -191,6 +192,32 @@ static void UpdateTexture( const TextureInfo & ti, CNativeTexture * texture )
 	if ( texture != nullptr && texture->HasData() )
 	{
 		ETextureFormat	format = texture->GetFormat();
+
+#if defined(DAEDALUS_CTR) && !defined(DAEDALUS_ACCURATE_TMEM)
+		// 1-pass direct RDRAM -> PICA200 Morton tile fast-path for power-of-two,
+		// non-mirrored, non-white RGBA16 and CI4/CI8 (RGBA16 TLUT) textures.
+		// Eliminates intermediate gTexelBuffer writes and redundant 5551 bit-shuffling.
+		if (format == TexFmt_5551 &&
+			!ti.GetWhite() &&
+			!ti.GetEmulateMirrorS() && !ti.GetEmulateMirrorT() &&
+			ti.GetWidth() == texture->GetCorrectedWidth() &&
+			ti.GetHeight() == texture->GetCorrectedHeight())
+		{
+			if (ti.GetFormat() == G_IM_FMT_RGBA && ti.GetSize() == G_IM_SIZ_16b)
+			{
+				if (texture->UploadDirectN64RGBA16(g_pu8RamBase, ti.GetLoadAddress(), ti.GetPitch(), ti.IsSwapped()))
+					return;
+			}
+			else if (ti.GetFormat() == G_IM_FMT_CI && ti.GetTLutFormat() != kTT_IA16 &&
+				(ti.GetSize() == G_IM_SIZ_4b || ti.GetSize() == G_IM_SIZ_8b))
+			{
+				if (texture->UploadDirectN64CI(g_pu8RamBase, ti.GetLoadAddress(), ti.GetPitch(),
+					ti.GetTlutAddress(), ti.GetSize() == G_IM_SIZ_8b, ti.IsSwapped()))
+					return;
+			}
+		}
+#endif
+
 		u32 			stride = texture->GetStride();
 
 		void *	texels;

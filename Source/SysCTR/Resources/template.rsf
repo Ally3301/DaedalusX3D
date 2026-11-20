@@ -59,7 +59,7 @@ AccessControlInfo:
   IdealProcessor                : 0
   AffinityMask                  : 3 # cores 0 and 1; core 1 is the syscore, granted by APT_SetAppCpuTimeLimit
   Priority                      : 16
-  MaxCpu                        : 0x9E # Default
+  MaxCpu                        : 80 # Allow up to 80% syscore (Core 1) time on Old 3DS in .cia builds
   HandleTableSize               : 0x200
   DisableDebug                  : false
   EnableForceDebug              : false

@@ -110,8 +110,8 @@ set (VITA_BUILD ${VITA_DEBUG_FILES} ${VITA_DYNAREC_FILES} ${VITA_GRAPHICS_FILES}
 set (CTR_MAIN_FILES SysCTR/main.cpp)
 set (CTR_DEBUG_FILES SysCTR/Debug/DaedalusAssertCTR.cpp SysCTR/Debug/DBGConsoleCTR.cpp )
 set (CTR_DYNAREC_FILES SysCTR/DynaRec/arm/AssemblyUtilsARM.cpp SysCTR/DynaRec/arm/AssemblyWriterARM.cpp SysCTR/DynaRec/arm/CodeBufferManagerARM.cpp SysCTR/DynaRec/arm/DynarecStubARM.S SysCTR/DynaRec/arm/CodeGeneratorARM.cpp SysCTR/DynaRec/arm/N64RegisterCacheARM.cpp)
-set (CTR_GRAPHICS_FILES SysCTR/Graphics/GraphicsContextCTR.cpp SysCTR/Graphics/NativeTextureCTR.cpp)
-set (CTR_HLEGRAPHICS_FILES SysCTR/HLEGraphics/GraphicsPluginCTR.cpp SysCTR/HLEGraphics/RendererCTR.cpp SysCTR/HLEGraphics/ColourAdjuster.cpp SysCTR/HLEGraphics/BlendModes.cpp SysCTR/HLEGraphics/Combiner/BlendConstant.cpp SysCTR/HLEGraphics/Combiner/CombinerExpression.cpp SysCTR/HLEGraphics/Combiner/CombinerTree.cpp SysCTR/HLEGraphics/Combiner/RenderSettings.cpp)
+set (CTR_GRAPHICS_FILES SysCTR/Graphics/Citro3DContext.cpp SysCTR/Graphics/GraphicsContextCTR.cpp SysCTR/Graphics/NativeTextureCTR.cpp)
+set (CTR_HLEGRAPHICS_FILES SysCTR/HLEGraphics/GraphicsPluginCTR.cpp SysCTR/HLEGraphics/RendererCTR.cpp SysCTR/HLEGraphics/ColourAdjuster.cpp SysCTR/HLEGraphics/BlendModes.cpp SysCTR/HLEGraphics/Combiner/BlendConstant.cpp SysCTR/HLEGraphics/Combiner/CombinerExpression.cpp SysCTR/HLEGraphics/Combiner/CombinerTree.cpp SysCTR/HLEGraphics/Combiner/RenderSettings.cpp SysCTR/HLEGraphics/Combiner/PicaTEVCombiner.cpp)
 set (CTR_HLEAUDIO_FILES SysCTR/HLEAudio/AudioPluginCTR.cpp SysCTR/HLEAudio/AudioOutput.cpp)
 set (CTR_INPUTMANAGER_FILES SysCTR/Input/InputManagerCTR.cpp)
 set (CTR_UI_FILES SysCTR/UI/UserInterface.cpp SysCTR/UI/RomSelector.cpp SysCTR/UI/InGameMenu.cpp SysCTR/UI/FrontendCTR.cpp)
@@ -315,7 +315,7 @@ endif (VITA_RELEASE)
 if (CTR_RELEASE)
 	message("N3DS Release Build..")
 
-	set(CMAKE_EXE_LINKER_FLAGS "-L${DEVKITPRO}/libctru/lib -L${DEVKITPRO}/picaGL/lib -L${DEVKITPRO}/portlibs/3ds/lib -specs=3dsx.specs -Wl,--gc-sections")
+	set(CMAKE_EXE_LINKER_FLAGS "-L${DEVKITPRO}/libctru/lib -L${DEVKITPRO}/portlibs/3ds/lib -specs=3dsx.specs -Wl,--gc-sections")
 
 
 	set(DAEDALUS_CTR_DEPS_DIR "${CMAKE_BINARY_DIR}/vendor" CACHE PATH
@@ -329,15 +329,41 @@ if (CTR_RELEASE)
 	else()
 		message(FATAL_ERROR "Missing build-local ARM libpng/zlib under ${DAEDALUS_CTR_DEPS_DIR}; install them there or set DAEDALUS_CTR_DEPS_DIR")
 	endif()
-	include_directories(${DEVKITPRO}/libctru/include ${DEVKITPRO}/picaGL/include ${DEVKITPRO}/portlibs/3ds/include)
+	include_directories(${DEVKITPRO}/libctru/include ${DEVKITPRO}/portlibs/3ds/include ${CMAKE_CURRENT_BINARY_DIR})
+
+	# Assemble minimal PICA200 vertex shader for the native citro3d backend.
+	set(CTR_VSHADER_SRC "${PROJECT_SOURCE_DIR}/SysCTR/Graphics/daedalus_vshader.v.pica")
+	set(CTR_VSHADER_SHBIN "${CMAKE_CURRENT_BINARY_DIR}/daedalus_vshader.shbin")
+	set(CTR_VSHADER_ASM "${CMAKE_CURRENT_BINARY_DIR}/daedalus_vshader_shbin.s")
+	set(CTR_VSHADER_HDR "${CMAKE_CURRENT_BINARY_DIR}/daedalus_vshader_shbin.h")
+
+	add_custom_command(
+		OUTPUT ${CTR_VSHADER_SHBIN}
+		COMMAND ${DEVKITPRO}/tools/bin/picasso -o ${CTR_VSHADER_SHBIN} ${CTR_VSHADER_SRC}
+		DEPENDS ${CTR_VSHADER_SRC}
+		COMMENT "Assembling PICA200 vertex shader (picasso)"
+	)
+	add_custom_command(
+		OUTPUT ${CTR_VSHADER_ASM} ${CTR_VSHADER_HDR}
+		COMMAND ${DEVKITPRO}/tools/bin/bin2s -H ${CTR_VSHADER_HDR} ${CTR_VSHADER_SHBIN} > ${CTR_VSHADER_ASM}
+		DEPENDS ${CTR_VSHADER_SHBIN}
+		COMMENT "Embedding PICA200 vertex shader binary (bin2s)"
+	)
+	set_source_files_properties(${CTR_VSHADER_ASM} PROPERTIES LANGUAGE ASM)
 
 	add_definitions("-DDAEDALUS_CTR" "-D__3DS__")
+	option(CTR_XRAY "Enable detailed CPU/DL X-Ray profiler telemetry" OFF)
+	if (CTR_XRAY)
+		add_definitions("-DDAEDALUS_CTR_XRAY")
+	endif()
 
 	# Build Daedalus Lib
 	add_library(daedalus STATIC
 		${BUILD}
 		${DEBUG_ONLY}
 		${CTR_BUILD}
+		${CTR_VSHADER_ASM}
+		${CTR_VSHADER_HDR}
 	)
 
 	target_include_directories(daedalus PRIVATE
@@ -389,7 +415,7 @@ if (CTR_RELEASE)
 
 	target_link_libraries(${PROJECT_NAME}.elf
 		daedalus
-		-lpicaGL
+		-lcitro3d
 		-lctru
 		-lm
 	)

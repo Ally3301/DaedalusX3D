@@ -1,7 +1,8 @@
 #include "stdafx.h"
 #include "RendererCTR.h"
 
-#include <GL/picaGL.h>
+#include <3ds.h>
+#include <citro3d.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <malloc.h>
@@ -20,6 +21,8 @@
 #include "HLEGraphics/TextureCache.h"
 #include "Math/MathUtil.h"
 #include "OSHLE/ultra_gbi.h"
+#include "SysCTR/Graphics/Citro3DContext.h"
+#include "SysCTR/Utility/PerfProfilerCTR.h"
 #include "Utility/IO.h"
 #include "Utility/Profiler.h"
 
@@ -27,6 +30,7 @@ BaseRenderer *gRenderer    = nullptr;
 RendererCTR  *gRendererCTR = nullptr;
 
 extern DaedalusVtx *gVtxBuffer;
+extern DaedalusVtx *gVtxBufferPtr;
 extern uint32_t     gVertexCount;
 extern uint32_t     gMaxVertices;
 
@@ -35,127 +39,38 @@ struct ScePspFMatrix4
 	float m[16];
 };
 
-
 ScePspFMatrix4		gProjection;
 static u32			gProjectionGen = 1;
 
 void sceGuSetMatrix(int type, const ScePspFMatrix4 * mtx)
 {
-	if (type == GL_PROJECTION)
+	if (type == 0)
 	{
 		memcpy(&gProjection, mtx, sizeof(gProjection));
 		++gProjectionGen;
 	}
 }
 
-void RendererCTR::ApplyBlendState(bool enable, u32 src, u32 dst)
+void RendererCTR::InstallNativeTexture(const CNativeTexture * texture, u32 wrap_s, u32 wrap_t, int unit)
 {
-	if (!mGlCache.valid || mGlCache.blend != enable)
-	{
-		if (enable) glEnable(GL_BLEND);
-		else glDisable(GL_BLEND);
-		mGlCache.blend = enable;
-	}
-	if (enable && (!mGlCache.valid || mGlCache.blendSrc != src || mGlCache.blendDst != dst))
-	{
-		glBlendFunc(src, dst);
-		mGlCache.blendSrc = src;
-		mGlCache.blendDst = dst;
-	}
-}
-
-void RendererCTR::ApplyDepthState(bool enable, bool mask, bool decal)
-{
-	if (!mGlCache.valid || mGlCache.decalOffset != decal)
-	{
-		if (decal) glPolygonOffset(-1.0f, -1.0f);
-		else glPolygonOffset(0.0f, 0.0f);
-		mGlCache.decalOffset = decal;
-	}
-	if (!mGlCache.valid || mGlCache.depthTest != enable)
-	{
-		if (enable) glEnable(GL_DEPTH_TEST);
-		else glDisable(GL_DEPTH_TEST);
-		mGlCache.depthTest = enable;
-	}
-	if (!mGlCache.valid || mGlCache.depthMask != mask)
-	{
-		glDepthMask(mask ? GL_TRUE : GL_FALSE);
-		mGlCache.depthMask = mask;
-	}
-}
-
-void RendererCTR::ApplyAlphaState(bool enable, u32 func, float ref)
-{
-	if (!mGlCache.valid || mGlCache.alphaTest != enable)
-	{
-		if (enable) glEnable(GL_ALPHA_TEST);
-		else glDisable(GL_ALPHA_TEST);
-		mGlCache.alphaTest = enable;
-	}
-	if (enable && (!mGlCache.valid || mGlCache.alphaFunc != func || mGlCache.alphaRef != ref))
-	{
-		glAlphaFunc(func, ref);
-		mGlCache.alphaFunc = func;
-		mGlCache.alphaRef = ref;
-	}
-}
-
-void RendererCTR::ApplyTexture2DState(bool enable)
-{
-	if (!mGlCache.valid || mGlCache.tex2d != enable)
-	{
-		if (enable)
-		{
-			glEnable(GL_TEXTURE_2D);
-		}
-		else
-		{
-			glDisable(GL_TEXTURE_2D);
-			// picaGL clears TEXUNIT0 enable without marking dirty bit 0x80 on the
-			// subsequent glEnable(GL_TEXTURE_2D); remember to force a rebind.
-			mGlCache.mForceTexRebind = true;
-		}
-		mGlCache.tex2d = enable;
-	}
-}
-
-void RendererCTR::InstallNativeTexture(const CNativeTexture * texture, u32 wrap_s, u32 wrap_t)
-{
-	ApplyTexture2DState(true);
-	if (mGlCache.mForceTexRebind)
-	{
-		glBindTexture(GL_TEXTURE_2D, 0);
-		mGlCache.mForceTexRebind = false;
-	}
-	// Always call InstallTexture() because CNativeTexture::SetData() can bind a
-	// newly uploaded texture outside RendererCTR; picaGL already no-ops same binds.
-	texture->InstallTexture();
+	if (unit == 0)
+		Citro3D::SetTextureEnabled(true);
 	const u32 cycle_mode = gRDPOtherMode.cycle_type;
-	const GLint filt = (((gRDPOtherMode.text_filt != G_TF_POINT) && cycle_mode != CYCLE_COPY) ||
-		gGlobalPreferences.ForceLinearFilter) ? GL_LINEAR : GL_NEAREST;
-	texture->ApplyParams(filt, (GLint)wrap_s, (GLint)wrap_t);
-}
-
-void RendererCTR::ApplyTexEnvMode(u32 mode)
-{
-	if (!mGlCache.valid || mGlCache.texEnvMode != mode)
-	{
-		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, mode);
-		mGlCache.texEnvMode = mode;
-	}
+	const GPU_TEXTURE_FILTER_PARAM filt = (((gRDPOtherMode.text_filt != G_TF_POINT) && cycle_mode != CYCLE_COPY) ||
+		gGlobalPreferences.ForceLinearFilter) ? GPU_LINEAR : GPU_NEAREST;
+	texture->ApplyParams(filt, static_cast<GPU_TEXTURE_WRAP_PARAM>(wrap_s), static_cast<GPU_TEXTURE_WRAP_PARAM>(wrap_t));
+	Citro3D::BindTextureUnit(unit, texture->GetC3DTexture());
 }
 
 void RendererCTR::ApplyProjectionMatrix(const float (&mat_project)[16])
 {
 	const float * ptr = mat_project;
 	const u32 gen = (ptr == gProjection.m) ? gProjectionGen : 0u;
-	if (!mGlCache.valid || mGlCache.projPtr != ptr || mGlCache.projGen != gen)
+	if (mLastProjPtr != ptr || mLastProjGen != gen)
 	{
-		glMatrixMode(GL_PROJECTION);
-		glLoadMatrixf(const_cast<float *>(ptr));
-		mGlCache.projPtr = ptr;
-		mGlCache.projGen = gen;
+		Citro3D::SetProjectionGL(ptr);
+		mLastProjPtr = ptr;
+		mLastProjGen = gen;
 	}
 }
 
@@ -168,15 +83,15 @@ void RendererCTR::InitBlenderModeCached()
 
 	// NB: If we're running in 1cycle mode, ignore the 2nd cycle.
 	u32 active_mode = (cycle_type == CYCLE_2CYCLE) ? blendmode : (blendmode & 0xCCCC);
-	
+
 	if (alpha_cvg_sel && (gRDPOtherMode.L & 0x7000) != 0x7000) {
 		switch (active_mode) {
 		case 0x4055: // Mario Golf
 		case 0x5055: // Paper Mario Intro
-			ApplyBlendState(true, GL_ZERO, GL_ONE);
+			Citro3D::SetBlendState(true, GPU_ZERO, GPU_ONE);
 			break;
 		default:
-			ApplyBlendState(false);
+			Citro3D::SetBlendState(false);
 		}
 		return;
 	}
@@ -195,33 +110,33 @@ void RendererCTR::InitBlenderModeCached()
 	case 0x0F0A: // DK64 blueprints
 	case 0xA500: // Sin and Punishment
 	case 0xFA00: // Bomberman second attack
-		ApplyBlendState(false);
+		Citro3D::SetBlendState(false);
 		break;
 	case 0x55F0: // Bust-A-Move 3 DX
-		ApplyBlendState(true, GL_ONE, GL_SRC_ALPHA);
+		Citro3D::SetBlendState(true, GPU_ONE, GPU_SRC_ALPHA);
 		break;
 	case 0x0F1A:
 		if (cycle_type == CYCLE_1CYCLE)
-			ApplyBlendState(false);
+			Citro3D::SetBlendState(false);
 		else
-			ApplyBlendState(true, GL_ZERO, GL_ONE);
+			Citro3D::SetBlendState(true, GPU_ZERO, GPU_ONE);
 		break;
 	case 0x0448: // Space Invaders
 	case 0x0554:
-		ApplyBlendState(true, GL_ONE, GL_ONE);
+		Citro3D::SetBlendState(true, GPU_ONE, GPU_ONE);
 		break;
 	case 0x0F5A: // Zelda: MM
 	case 0x0FA5: // OOT menu
 	case 0x5055: // Paper Mario intro
 	case 0xAF50: // Zelda: MM
 	case 0xC712: // Pokemon Stadium
-		ApplyBlendState(true, GL_ZERO, GL_ONE);
+		Citro3D::SetBlendState(true, GPU_ZERO, GPU_ONE);
 		break;
 	case 0x0C40: // Extreme-G
 	case 0x0C48: // Star Wars: Shadow of the Empire text and hud
 	case 0x4C40: // Wave Race
 	case 0x5F50:
-		ApplyBlendState(true, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+		Citro3D::SetBlendState(true, GPU_ZERO, GPU_ONE_MINUS_SRC_ALPHA);
 		break;
 	case 0x0010: // Diddy Kong rare logo
 	case 0x0040: // F-Zero X
@@ -242,32 +157,51 @@ void RendererCTR::InitBlenderModeCached()
 	case 0x0D18:
 	case 0x8410: // Paper Mario
 	case 0xF550:
-		if (!(!alpha_cvg_sel || cvg_x_alpha)) ApplyBlendState(false);
-		else ApplyBlendState(true, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		if (!(!alpha_cvg_sel || cvg_x_alpha)) Citro3D::SetBlendState(false);
+		else Citro3D::SetBlendState(true, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
 		break;
 	case 0xC912: // 40 Winks
-		ApplyBlendState(true, GL_SRC_ALPHA, GL_ONE);
+		Citro3D::SetBlendState(true, GPU_SRC_ALPHA, GPU_ONE);
 		break;
 	case 0x0C19:
 	case 0xC811:
-		ApplyBlendState(true, GL_SRC_ALPHA, GL_DST_ALPHA);
+		Citro3D::SetBlendState(true, GPU_SRC_ALPHA, GPU_DST_ALPHA);
 		break;
 	case 0x5000: // V8 explosions
-		ApplyBlendState(true, GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA);
+		Citro3D::SetBlendState(true, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA);
 		break;
 	default:
-		if (!(!alpha_cvg_sel || cvg_x_alpha)) ApplyBlendState(false);
-		else ApplyBlendState(true, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		if (!(!alpha_cvg_sel || cvg_x_alpha)) Citro3D::SetBlendState(false);
+		else Citro3D::SetBlendState(true, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
 		break;
 	}
 }
 
 RendererCTR::RendererCTR()
+:	mLastProjPtr(nullptr)
+,	mLastProjGen(0)
+,	mLastTevProg(nullptr)
+,	mLastTevPrim(0)
+,	mLastTevEnv(0)
+,	mLastTevPrimLod(0)
+,	mFastStateValid(false)
+,	mFastMux(0)
+,	mFastOtherMode(0)
+,	mFastTnlFlags(0)
+,	mFastDisableZ(false)
+,	mFastPrimCol(0)
+,	mFastEnvCol(0)
+,	mFastBlendCol(0)
+,	mFastPrimLod(0)
+,	mFastTex0(nullptr)
+,	mFastTex1(nullptr)
+,	mFastWrap0U(0)
+,	mFastWrap0V(0)
+,	mFastWrap1U(0)
+,	mFastWrap1V(0)
+,	mFastHasTex(false)
 {
-	memset(&mGlCache, 0, sizeof(mGlCache));
-	//
-	//	Set up RGB = T0, A = T0
-	//
+	// Set up RGB = T0, A = T0
 	mCopyBlendStates = new CBlendStates;
 	{
 		CAlphaRenderSettings *	alpha_settings( new CAlphaRenderSettings( "Copy" ) );
@@ -280,9 +214,7 @@ RendererCTR::RendererCTR()
 		mCopyBlendStates->AddColourSettings( colour_settings );
 	}
 
-	//
-	//	Set up RGB = Diffuse, A = Diffuse
-	//
+	// Set up RGB = Diffuse, A = Diffuse
 	mFillBlendStates = new CBlendStates;
 	{
 		CAlphaRenderSettings *	alpha_settings( new CAlphaRenderSettings( "Fill" ) );
@@ -294,161 +226,165 @@ RendererCTR::RendererCTR()
 		mFillBlendStates->SetAlphaSettings( alpha_settings );
 		mFillBlendStates->AddColourSettings( colour_settings );
 	}
-
 }
 
 RendererCTR::~RendererCTR()
 {
+	for (u32 i = 0; i < kBlendTableSize; ++i)
+	{
+		if (mBlendTable[i].occupied && mBlendTable[i].entry.States != nullptr)
+			delete mBlendTable[i].entry.States;
+	}
+	if (mOverflowEntry.States != nullptr)
+		delete mOverflowEntry.States;
 	delete mFillBlendStates;
 	delete mCopyBlendStates;
 }
 
 void RendererCTR::RestoreRenderStates()
-{	
-	// Initialise the device to our default state
-	glEnable(GL_TEXTURE_2D);
-	
-	// No fog
-	glDisable(GL_FOG);
-	glFogi(GL_FOG_MODE, GL_LINEAR);
-
-	glScissor(0,0, 400, 240);
-	glEnable(GL_SCISSOR_TEST);
-	
-	glBlendEquation(GL_FUNC_ADD);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-	glDisable( GL_BLEND );
-	
-	// Default is ZBuffer disabled
-	glDepthMask(GL_FALSE);
-	glDepthFunc(GL_LEQUAL);
-	glDisable(GL_DEPTH_TEST);
-	
-	// Enable this for rendering decals (glPolygonOffset).
-	glEnable(GL_POLYGON_OFFSET_FILL);
-		
-	glMatrixMode(GL_MODELVIEW);
-	glLoadIdentity();
-	
-	float envcolor[4] = { c32::White.GetRf(), c32::White.GetGf(), c32::White.GetBf(), c32::White.GetAf() };
-
-	glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, envcolor);
-	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
-
-	glColor3f(1.0f, 1.0f, 1.0f);
-
-	// Reset local GL state cache to match the restored defaults.
-	memset(&mGlCache, 0, sizeof(mGlCache));
-	mGlCache.valid = false;
-	mGlCache.mForceTexRebind = true;
+{
+	Citro3D::RestoreDefaultGameState();
+	mLastProjPtr    = nullptr;
+	mLastProjGen    = 0;
+	mLastTevProg    = nullptr;
+	mFastStateValid = false;
 }
 
-RendererCTR::SBlendStateEntry RendererCTR::LookupBlendState( u64 mux, bool two_cycles )
+const RendererCTR::SBlendStateEntry & RendererCTR::LookupBlendState( u64 mux, bool two_cycles )
 {
-	#ifdef DAEDALUS_DEBUG_DISPLAYLIST
-	DAEDALUS_PROFILE( "RendererCtr::LookupBlendState" );
-	mRecordedCombinerStates.insert( mux );
-	#endif
-
 	REG64 key;
 	key._u64 = mux;
+	// Top 8 bits are never set - use bit 31 of high word to distinguish 1-cycle vs 2-cycle.
+	key._u32_1 |= (static_cast<u32>(two_cycles) << 31);
 
-	// Top 8 bits are never set - use the very top one to differentiate between 1/2 cycles
-	key._u32_1 |= (two_cycles << 31);
+	const u32 mask = kBlendTableSize - 1;
+	u32 slotIdx = (key._u32_0 ^ (key._u32_0 >> 11) ^ key._u32_1 ^ (key._u32_1 >> 13)) & mask;
 
-	const u32 slotIdx = (key._u32_0 ^ (key._u32_0 >> 11) ^ key._u32_1 ^ (key._u32_1 >> 13)) & (kBlendCacheSize - 1);
-	SBlendCacheSlot & cacheSlot = mBlendCache[slotIdx];
-	if (cacheSlot.valid && cacheSlot.key == key._u64)
+	for (u32 probe = 0; probe < 16; ++probe)
 	{
-		return cacheSlot.entry;
+		SBlendTableSlot & slot = mBlendTable[(slotIdx + probe) & mask];
+		if (slot.occupied)
+		{
+			if (slot.key == key._u64)
+				return slot.entry;
+			continue;
+		}
+
+		// Populate new entry.
+		SBlendStateEntry & entry = slot.entry;
+		entry = SBlendStateEntry();
+
+		// 1) Preserve explicit forced game hacks from BlendModes.cpp (small curated list).
+		OverrideBlendModeFn forced = LookupOverrideBlendModeForced( mux );
+		if (forced != nullptr)
+		{
+			entry.OverrideFunction = forced;
+		}
+		else if (PicaTEV::CompileMux( mux, two_cycles, entry.TevProgram ))
+		{
+			// Exact native PICA200 multi-stage hardware TEV program compiled!
+			// Zero multipass overdraw, zero CPU vertex-color rewriting!
+		}
+		else
+		{
+			// Fallback to Daedalus combiner tree / inexact override for unsupported inputs (NOISE/K5/etc.).
+			CCombinerTree tree( mux, two_cycles );
+			entry.States = tree.GetBlendStates();
+			if (entry.States->IsInexact())
+				entry.OverrideFunction = LookupOverrideBlendModeInexact( mux );
+		}
+
+		slot.key = key._u64;
+		slot.occupied = true;
+		return slot.entry;
 	}
 
-	BlendStatesMap::const_iterator	it( mBlendStatesMap.find( key._u64 ) );
-	if( it != mBlendStatesMap.end() )
+	// Rare overflow (more than 512 distinct muxes with 16-probe collision): compile into scratch slot.
+	if (mOverflowEntry.States != nullptr)
 	{
-		cacheSlot.key   = key._u64;
-		cacheSlot.entry = it->second;
-		cacheSlot.valid = true;
-		return it->second;
+		delete mOverflowEntry.States;
+		mOverflowEntry.States = nullptr;
 	}
-
-	// Blendmodes with Inexact blends either get an Override blend or a Default blend (GU_TFX_MODULATE)
-	// If its not an Inexact blend then we check if we need to Force a blend mode none the less// Salvy
-	//
-	SBlendStateEntry entry;
-	CCombinerTree tree( mux, two_cycles );
-	entry.States = tree.GetBlendStates();
-
-	if( entry.States->IsInexact() )
+	mOverflowEntry = SBlendStateEntry();
+	OverrideBlendModeFn forced = LookupOverrideBlendModeForced( mux );
+	if (forced != nullptr)
 	{
-		entry.OverrideFunction = LookupOverrideBlendModeInexact( mux );
+		mOverflowEntry.OverrideFunction = forced;
 	}
-	else
+	else if (!PicaTEV::CompileMux( mux, two_cycles, mOverflowEntry.TevProgram ))
 	{
-		// This is for non-inexact blends, errg hacks and such to be more precise
-		entry.OverrideFunction = LookupOverrideBlendModeForced( mux );
+		CCombinerTree tree( mux, two_cycles );
+		mOverflowEntry.States = tree.GetBlendStates();
+		if (mOverflowEntry.States->IsInexact())
+			mOverflowEntry.OverrideFunction = LookupOverrideBlendModeInexact( mux );
 	}
-
-	#ifdef DAEDALUS_DEBUG_DISPLAYLIST
-	printf( "Adding %08x%08x - %d cycles - %s\n", u32(mux>>32), u32(mux), two_cycles ? 2 : 1, entry.States->IsInexact() ?  IsCombinerStateDefault(mux) ? "Inexact(Default)" : "Inexact(Override)" : entry.OverrideFunction==nullptr ? "Auto" : "Forced");
-	#endif
-
-	//Add blend mode to the Blend States Map
-	mBlendStatesMap[ key._u64 ] = entry;
-
-	cacheSlot.key   = key._u64;
-	cacheSlot.entry = entry;
-	cacheSlot.valid = true;
-
-	return entry;
+	return mOverflowEntry;
 }
 
-void RendererCTR::DrawPrimitives(DaedalusVtx * p_vertices, u32 num_vertices, u32 triangle_mode, bool has_texture)
+void RendererCTR::DrawPrimitives(DaedalusVtx * p_vertices, u32 num_vertices, GPU_Primitive_t triangle_mode, bool has_texture)
 {
 	(void)has_texture;
 	if (num_vertices < 3 || gMaxVertices < 3)
 		return;
 
-	// Only these modes are used by this renderer. Do not split an unknown
-	// topology into batches whose interpretation might be different.
-	if (triangle_mode != GL_TRIANGLES && triangle_mode != GL_TRIANGLE_STRIP && triangle_mode != GL_TRIANGLE_FAN)
+	if (triangle_mode != GPU_TRIANGLES && triangle_mode != GPU_TRIANGLE_STRIP && triangle_mode != GPU_TRIANGLE_FAN)
 		return;
+
+	// Zero-copy fast path: BaseRenderer::PrepareTrisUnclipped wrote DaedalusVtx directly
+	// into gVtxBuffer! Skip memcpy completely and submit straight from linear RAM.
+	if (p_vertices == gVtxBuffer && triangle_mode == GPU_TRIANGLES &&
+		num_vertices <= gMaxVertices && gVertexCount <= gMaxVertices - num_vertices)
+	{
+		const u32 count = num_vertices - (num_vertices % 3);
+		if (count >= 3)
+		{
+			Citro3D::DrawArrays(GPU_TRIANGLES, static_cast<int>(gVertexCount), static_cast<int>(count));
+			gVtxBuffer   += count;
+			gVertexCount += count;
+		}
+		return;
+	}
 
 	u32 offset = 0;
 	while (offset < num_vertices)
 	{
 		u32 remaining = num_vertices - offset;
 		u32 count = remaining < gMaxVertices ? remaining : gMaxVertices;
-		if (triangle_mode == GL_TRIANGLE_FAN && offset != 0)
+		if (triangle_mode == GPU_TRIANGLE_FAN && offset != 0)
 			count = (remaining < gMaxVertices - 1 ? remaining : gMaxVertices - 1) + 1;
-		u32 mode = triangle_mode;
+		GPU_Primitive_t mode = triangle_mode;
 		bool strip_triangle = false;
 
-		if (triangle_mode == GL_TRIANGLES)
+		if (triangle_mode == GPU_TRIANGLES)
 		{
-			// Incomplete trailing vertices cannot form a triangle.
 			count -= count % 3;
 			if (count == 0)
 				break;
 		}
-		else if (triangle_mode == GL_TRIANGLE_STRIP && gMaxVertices == 3)
+		else if (triangle_mode == GPU_TRIANGLE_STRIP && gMaxVertices == 3)
 		{
-			// A three-vertex strip cannot restart at an even offset.
-			mode = GL_TRIANGLES;
+			mode = GPU_TRIANGLES;
 			strip_triangle = true;
 		}
-		else if (triangle_mode == GL_TRIANGLE_STRIP && remaining > gMaxVertices)
-			count -= count % 2; // Preserve strip winding after the restart.
+		else if (triangle_mode == GPU_TRIANGLE_STRIP && remaining > gMaxVertices)
+		{
+			count -= count % 2;
+		}
 
 		if (gVertexCount > gMaxVertices || count > gMaxVertices - gVertexCount)
 		{
-			// Commands may still reference the old buffer contents.
-			glFinish();
+			if (gVertexCount > 0 && gVtxBufferPtr != nullptr)
+				Citro3D::FlushDataCache(gVtxBufferPtr, gVertexCount * sizeof(DaedalusVtx));
+			Citro3D::SplitGameFrame();
 			CGraphicsContext::Get()->ResetVertexBuffer();
+			Citro3D::SetVertexBuffer(gVtxBufferPtr, sizeof(DaedalusVtx));
+			mLastProjPtr    = nullptr;
+			mLastProjGen    = 0;
+			mLastTevProg    = nullptr;
+			mFastStateValid = false;
 		}
 
-		if (triangle_mode != GL_TRIANGLE_FAN && !strip_triangle)
+		if (triangle_mode != GPU_TRIANGLE_FAN && !strip_triangle)
 		{
 			memcpy(gVtxBuffer, p_vertices + offset, count * sizeof(DaedalusVtx));
 			gVtxBuffer += count;
@@ -459,7 +395,7 @@ void RendererCTR::DrawPrimitives(DaedalusVtx * p_vertices, u32 num_vertices, u32
 			for (u32 i = 0; i < count; ++i)
 			{
 				u32 index;
-				if (triangle_mode == GL_TRIANGLE_FAN && offset != 0)
+				if (triangle_mode == GPU_TRIANGLE_FAN && offset != 0)
 					index = i == 0 ? 0 : offset + (i - 1);
 				else if (strip_triangle && (offset & 1) && i < 2)
 					index = offset + 1 - i;
@@ -471,12 +407,12 @@ void RendererCTR::DrawPrimitives(DaedalusVtx * p_vertices, u32 num_vertices, u32
 			gVtxBuffer += count;
 		}
 
-		glDrawArrays(mode, gVertexCount, count);
+		Citro3D::DrawArrays(mode, static_cast<int>(gVertexCount), static_cast<int>(count));
 		gVertexCount += count;
 
-		if (triangle_mode == GL_TRIANGLES)
+		if (triangle_mode == GPU_TRIANGLES)
 			offset += count;
-		else if (triangle_mode == GL_TRIANGLE_STRIP)
+		else if (triangle_mode == GPU_TRIANGLE_STRIP)
 		{
 			if (remaining <= count)
 				break;
@@ -484,8 +420,6 @@ void RendererCTR::DrawPrimitives(DaedalusVtx * p_vertices, u32 num_vertices, u32
 		}
 		else
 		{
-			// Subsequent fan batches contain the original centre and the
-			// previous rim vertex; offset points at that rim vertex.
 			if (offset == 0)
 			{
 				if (remaining <= count)
@@ -502,8 +436,9 @@ void RendererCTR::DrawPrimitives(DaedalusVtx * p_vertices, u32 num_vertices, u32
 	}
 }
 
-void RendererCTR::RenderUsingRenderSettings( const CBlendStates * states, DaedalusVtx * p_vertices, u32 num_vertices, u32 triangle_mode)
+void RendererCTR::RenderUsingRenderSettings( const CBlendStates * states, DaedalusVtx * p_vertices, u32 num_vertices, GPU_Primitive_t triangle_mode)
 {
+	mLastTevProg = nullptr;
 	const CAlphaRenderSettings *	alpha_settings( states->GetAlphaSettings() );
 
 	SRenderState	state;
@@ -547,8 +482,6 @@ void RendererCTR::RenderUsingRenderSettings( const CBlendStates * states, Daedal
 		settings->Apply( install_texture0 || install_texture1, state, out );
 		alpha_settings->Apply( install_texture0 || install_texture1, state, out );
 
-		// Vertex expressions change only Colour; each pass starts from the
-		// original colours rather than the previous pass's output.
 		if( i > 0 )
 		{
 			for (u32 j = 0; j < num_vertices; ++j)
@@ -570,32 +503,29 @@ void RendererCTR::RenderUsingRenderSettings( const CBlendStates * states, Daedal
 
 		if(install_texture0 || install_texture1)
 		{
-			u32	tfx = GL_MODULATE;
+			u32	tfx = CTR_TEXENV_MODULATE;
 			switch( out.BlendMode )
 			{
 			case PBM_MODULATE:
-				tfx = GL_MODULATE;
+				tfx = CTR_TEXENV_MODULATE;
 				break;
 			case PBM_REPLACE:
-				tfx = GL_REPLACE;
+				tfx = CTR_TEXENV_REPLACE;
 				break;
 			case PBM_BLEND:
-				tfx = GL_BLEND;
-				float envcolor[4] = { out.TextureFactor.GetRf(), out.TextureFactor.GetGf(), out.TextureFactor.GetBf(), out.TextureFactor.GetAf() };
-				glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, envcolor);
+				tfx = CTR_TEXENV_BLEND;
+				Citro3D::SetTexEnvColor(out.TextureFactor.GetColour());
 				break;
 			}
-			
-			ApplyTexEnvMode(tfx);
+
+			Citro3D::SetTexEnvMode(tfx);
 
 			if( g_ROM.T1_HACK )
 			{
-				// NB if install_texture0 and install_texture1 are both set, 1 wins out
 				texture_idx = install_texture1;
 			}
 			else
 			{
-				// NB if install_texture0 and install_texture1 are both set, 0 wins out
 				texture_idx = install_texture0 ? 0 : 1;
 			}
 
@@ -614,47 +544,69 @@ void RendererCTR::RenderUsingRenderSettings( const CBlendStates * states, Daedal
 
 			if(texture != nullptr)
 			{
-				InstallNativeTexture(texture, mTexWrap[texture_idx].u, mTexWrap[texture_idx].v);
+				InstallNativeTexture(texture, mTexWrap[texture_idx].u, mTexWrap[texture_idx].v, 0);
 				installed_texture = true;
 			}
 		}
 
-		// If no texture was specified, or if we couldn't load it, clear it out
 		if( !installed_texture )
-			ApplyTexture2DState(false);
+			Citro3D::SetTextureEnabled(false);
 
 		DrawPrimitives(p_vertices, num_vertices, triangle_mode, installed_texture);
-
-		/*if ( mTnL.Flags.Fog )
-		{
-			RenderFog( p_FogVtx, num_vertices, triangle_mode, render_flags );
-		}*/
 	}
 	if (saved_colours != mVtx_Save)
 		free(saved_colours);
 }
 
-
-void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], DaedalusVtx * p_vertices, u32 num_vertices, u32 triangle_mode, bool disable_zbuffer )
+void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], DaedalusVtx * p_vertices, u32 num_vertices, GPU_Primitive_t triangle_mode, bool disable_zbuffer )
 {
 	ApplyProjectionMatrix(mat_project);
 
+	const u32 primCol  = mPrimitiveColour.GetColour();
+	const u32 envCol   = mEnvColour.GetColour();
+	const u32 blendCol = mBlendColour.GetColour();
+	const float lodF   = mPrimLODFraction < 0.0f ? 0.0f : (mPrimLODFraction > 1.0f ? 1.0f : mPrimLODFraction);
+	const u8 primLod   = static_cast<u8>(lodF * 255.0f + 0.5f);
+
+	// Fast path: when consecutive triangle draws share identical RDP state, mux,
+	// colours, and bound textures, skip all state setup and go straight to DrawPrimitives
+	// (which coalesces contiguous GPU_TRIANGLES into a single hardware draw call!).
+	if (mFastStateValid &&
+		mFastMux        == mMux &&
+		mFastOtherMode  == gRDPOtherMode._u64 &&
+		mFastTnlFlags   == (mTnL.Flags._u32 & TNL_ZBUFFER) &&
+		mFastDisableZ   == disable_zbuffer &&
+		mFastPrimCol    == primCol &&
+		mFastEnvCol     == envCol &&
+		mFastBlendCol   == blendCol &&
+		mFastPrimLod    == primLod &&
+		mFastTex0       == mBoundTexture[0] &&
+		mFastTex1       == mBoundTexture[1] &&
+		mFastWrap0U     == mTexWrap[0].u &&
+		mFastWrap0V     == mTexWrap[0].v &&
+		mFastWrap1U     == mTexWrap[1].u &&
+		mFastWrap1V     == mTexWrap[1].v)
+	{
+		DrawPrimitives(p_vertices, num_vertices, triangle_mode, mFastHasTex);
+		return;
+	}
+	mFastStateValid = false;
+
 	if ( disable_zbuffer )
 	{
-		ApplyDepthState(false, false, false);
+		Citro3D::SetDepthState(false, false, false);
 	}
 	else
 	{
 		const bool decal = (gRDPOtherMode.zmode == 3);
 		const bool depth_enable = ((mTnL.Flags.Zbuffer & gRDPOtherMode.z_cmp) || gRDPOtherMode.z_upd) != 0;
 		const bool depth_mask = gRDPOtherMode.z_upd != 0;
-		ApplyDepthState(depth_enable, depth_mask, decal);
+		Citro3D::SetDepthState(depth_enable, depth_mask, decal);
 	}
-	
+
 	u32 cycle_mode = gRDPOtherMode.cycle_type;
-	
+
 	// Initiate Blender
-	//
 	if(cycle_mode < CYCLE_COPY && gRDPOtherMode.force_bl)
 	{
 		InitBlenderModeCached();
@@ -663,46 +615,169 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 	{
 		if ((cycle_mode == CYCLE_1CYCLE && gRDPOtherMode.c1_m2a == 1) ||
 		    (cycle_mode == CYCLE_2CYCLE && gRDPOtherMode.c2_m2a == 1))
-			ApplyBlendState(true, GL_ZERO, GL_ONE);
+			Citro3D::SetBlendState(true, GPU_ZERO, GPU_ONE);
 		else
-			ApplyBlendState(false);
+			Citro3D::SetBlendState(false);
 	}
 	else
 	{
-		ApplyBlendState(false);
+		Citro3D::SetBlendState(false);
 	}
-	
+
 	// Initiate Alpha test
-	//
 	if( (gRDPOtherMode.alpha_compare == G_AC_THRESHOLD) && !gRDPOtherMode.alpha_cvg_sel )
 	{
 		u8 alpha_threshold = mBlendColour.GetA();
-		ApplyAlphaState(true, (alpha_threshold || g_ROM.ALPHA_HACK) ? GL_GEQUAL : GL_GREATER, mBlendColour.GetAf());
+		Citro3D::SetAlphaTest(true, (alpha_threshold || g_ROM.ALPHA_HACK) ? GPU_GEQUAL : GPU_GREATER, alpha_threshold);
 	}
 	else if (gRDPOtherMode.cvg_x_alpha)
 	{
-		ApplyAlphaState(true, GL_GEQUAL, 0.04392f);
+		Citro3D::SetAlphaTest(true, GPU_GEQUAL, 11);
 	}
 	else
 	{
-		ApplyAlphaState(false);
+		Citro3D::SetAlphaTest(false);
 	}
 
-	mGlCache.valid = true;
-	
-	SBlendStateEntry		blend_entry;
-
-	switch ( cycle_mode )
+	// Fast paths for CYCLE_COPY and CYCLE_FILL (avoid mux lookup completely).
+	if (cycle_mode == CYCLE_COPY)
 	{
-		case CYCLE_COPY:		blend_entry.States = mCopyBlendStates; break;
-		case CYCLE_FILL:		blend_entry.States = mFillBlendStates; break;
-		case CYCLE_1CYCLE:		blend_entry = LookupBlendState( mMux, false ); break;
-		case CYCLE_2CYCLE:		blend_entry = LookupBlendState( mMux, true ); break;
+		mLastTevProg = nullptr;
+		if (mBoundTexture[0] != nullptr)
+		{
+			Citro3D::SetTexEnvMode(CTR_TEXENV_REPLACE);
+			InstallNativeTexture(mBoundTexture[0], mTexWrap[0].u, mTexWrap[0].v, 0);
+
+			mFastStateValid = true;
+			mFastMux        = mMux;
+			mFastOtherMode  = gRDPOtherMode._u64;
+			mFastTnlFlags   = (mTnL.Flags._u32 & TNL_ZBUFFER);
+			mFastDisableZ   = disable_zbuffer;
+			mFastPrimCol    = primCol;
+			mFastEnvCol     = envCol;
+			mFastBlendCol   = blendCol;
+			mFastPrimLod    = primLod;
+			mFastTex0       = mBoundTexture[0];
+			mFastTex1       = mBoundTexture[1];
+			mFastWrap0U     = mTexWrap[0].u;
+			mFastWrap0V     = mTexWrap[0].v;
+			mFastWrap1U     = mTexWrap[1].u;
+			mFastWrap1V     = mTexWrap[1].v;
+			mFastHasTex     = true;
+
+			DrawPrimitives(p_vertices, num_vertices, triangle_mode, true);
+		}
+		else
+		{
+			Citro3D::SetTextureEnabled(false);
+			DrawPrimitives(p_vertices, num_vertices, triangle_mode, false);
+		}
+		return;
 	}
-	
+
+	if (cycle_mode == CYCLE_FILL)
+	{
+		mLastTevProg = nullptr;
+		Citro3D::SetTextureEnabled(false);
+		DrawPrimitives(p_vertices, num_vertices, triangle_mode, false);
+		return;
+	}
+
+	const SBlendStateEntry & blend_entry = LookupBlendState( mMux, cycle_mode == CYCLE_2CYCLE );
+
+	// 1) Native PICA200 multi-stage hardware TEV fast path:
+	//    Single GPU pass, dual simultaneous texture units, live hardware constants,
+	//    ZERO CPU vertex-color rewriting!
+	if (blend_entry.TevProgram.valid)
+	{
+		const SPicaTevProgram & prog = blend_entry.TevProgram;
+		bool texturesOk = true;
+
+		if (prog.usesTex0)
+		{
+			if (mBoundTexture[0] != nullptr)
+				InstallNativeTexture(mBoundTexture[0], mTexWrap[0].u, mTexWrap[0].v, 0);
+			else
+				texturesOk = false;
+		}
+		if (prog.usesTex1 && texturesOk)
+		{
+			if (mBoundTexture[1] != nullptr)
+			{
+				InstallNativeTexture(mBoundTexture[1], mTexWrap[1].u, mTexWrap[1].v, 1);
+
+				// Compute exact TEXUNIT1 UV transform relative to TEXUNIT0 vertices.
+				const CNativeTexture * t0 = mBoundTexture[0];
+				const CNativeTexture * t1 = mBoundTexture[1];
+				if (t0 != nullptr)
+				{
+					const float s0x = t0->GetScaleX();
+					const float s0y = t0->GetScaleY();
+					const float s1x = t1->GetScaleX();
+					const float s1y = t1->GetScaleY();
+					const float rx = (s0x > 0.0f) ? (s1x / s0x) : 1.0f;
+					const float ry = (s0y > 0.0f) ? (s1y / s0y) : 1.0f;
+					const float off0x = mTileTopLeft[0].s * (0.25f * s0x);
+					const float off0y = mTileTopLeft[0].t * (0.25f * s0y);
+					const float off1x = mTileTopLeft[1].s * (0.25f * s1x);
+					const float off1y = mTileTopLeft[1].t * (0.25f * s1y);
+					Citro3D::SetUv1Transform(rx, ry, off0x * rx - off1x, off0y * ry - off1y);
+				}
+				else
+				{
+					Citro3D::SetUv1Transform(1.0f, 1.0f, 0.0f, 0.0f);
+				}
+			}
+			else if (mBoundTexture[0] != nullptr)
+			{
+				// Some games reference TEXEL1 while only tile 0 is bound; mirror tile 0 safely.
+				InstallNativeTexture(mBoundTexture[0], mTexWrap[0].u, mTexWrap[0].v, 1);
+				Citro3D::SetUv1Transform(1.0f, 1.0f, 0.0f, 0.0f);
+			}
+			else
+			{
+				texturesOk = false;
+			}
+		}
+
+		if (texturesOk)
+		{
+			if (mLastTevProg != &prog || mLastTevPrim != primCol || mLastTevEnv != envCol || mLastTevPrimLod != primLod)
+			{
+				PicaTEV::ApplyProgram(prog, primCol, envCol, primLod);
+				mLastTevProg    = &prog;
+				mLastTevPrim    = primCol;
+				mLastTevEnv     = envCol;
+				mLastTevPrimLod = primLod;
+			}
+			Citro3D::MarkCustomTevActive();
+
+			mFastStateValid = !prog.usesTex1; // Cache fast-path for single-tex / untextured TEV programs
+			mFastMux        = mMux;
+			mFastOtherMode  = gRDPOtherMode._u64;
+			mFastTnlFlags   = (mTnL.Flags._u32 & TNL_ZBUFFER);
+			mFastDisableZ   = disable_zbuffer;
+			mFastPrimCol    = primCol;
+			mFastEnvCol     = envCol;
+			mFastBlendCol   = blendCol;
+			mFastPrimLod    = primLod;
+			mFastTex0       = mBoundTexture[0];
+			mFastTex1       = mBoundTexture[1];
+			mFastWrap0U     = mTexWrap[0].u;
+			mFastWrap0V     = mTexWrap[0].v;
+			mFastWrap1U     = mTexWrap[1].u;
+			mFastWrap1V     = mTexWrap[1].v;
+			mFastHasTex     = prog.usesTex0 || prog.usesTex1;
+
+			DrawPrimitives(p_vertices, num_vertices, triangle_mode, mFastHasTex);
+			return;
+		}
+	}
+
+	// 2) Forced override / fallback path for unsupported muxes (NOISE, K4/K5, >6 stages) or missing textures.
 	if( blend_entry.OverrideFunction != nullptr )
 	{
-		// Local vars for now
+		mLastTevProg = nullptr;
 		SBlendModeDetails details;
 
 		details.EnvColour = mEnvColour;
@@ -711,8 +786,6 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 		details.ColourAdjuster.Reset();
 
 		blend_entry.OverrideFunction( details );
-		// Override functions call glTexEnvi directly; invalidate cached mode.
-		mGlCache.texEnvMode = 0;
 
 		bool installed_texture = false;
 
@@ -722,17 +795,15 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 
 			if( mBoundTexture[ texture_idx ] )
 			{
-				InstallNativeTexture(mBoundTexture[ texture_idx ], mTexWrap[texture_idx].u, mTexWrap[texture_idx].v);
+				InstallNativeTexture(mBoundTexture[ texture_idx ], mTexWrap[texture_idx].u, mTexWrap[texture_idx].v, 0);
 				installed_texture = true;
 			}
 		}
-		
-		// If no texture was specified, or if we couldn't load it, clear it out
+
 		if( !installed_texture )
 		{
-			ApplyTexture2DState(false);
+			Citro3D::SetTextureEnabled(false);
 		}
-		
 
 		details.ColourAdjuster.Process(p_vertices, num_vertices);
 		DrawPrimitives(p_vertices, num_vertices, triangle_mode, installed_texture);
@@ -743,53 +814,44 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 	}
 	else
 	{
-		#ifdef DAEDALUS_DEBUG_CONSOLE
-		// Set default states
-		DAEDALUS_ERROR( "Unhandled blend mode" );
-		#endif
-		ApplyTexture2DState(false);
+		mLastTevProg = nullptr;
+		Citro3D::SetTextureEnabled(false);
 		DrawPrimitives(p_vertices, num_vertices, triangle_mode, false);
 	}
-
 }
 
 void RendererCTR::RenderTriangles(DaedalusVtx *p_vertices, u32 num_vertices, bool disable_zbuffer)
 {
-	// Tile snapshots and UV scaling are already fused into BaseRenderer::FlushTris /
-	// PrepareTrisUnclipped on CTR to avoid a second pass over every vertex.
-	if (mTnL.Flags.Texture)
-	{
-		ApplyTexture2DState(true);
-	}
-	
-	RenderUsingCurrentBlendMode(gProjection.m, p_vertices, num_vertices, GL_TRIANGLES, disable_zbuffer);
+	const u64 drw_t0 = svcGetSystemTick();
+	RenderUsingCurrentBlendMode(gProjection.m, p_vertices, num_vertices, GPU_TRIANGLES, disable_zbuffer);
+	PerfCTR::AddDraw(svcGetSystemTick() - drw_t0);
 }
 
 void RendererCTR::TexRect(u32 tile_idx, const v2 & xy0, const v2 & xy1, TexCoord st0, TexCoord st1)
 {
-	// FIXME(strmnnrmn): in copy mode, depth buffer is always disabled. Might not need to check this explicitly.
+#ifdef DAEDALUS_CTR_XRAY
+	const u64 r_t0 = svcGetSystemTick();
+#endif
 	UpdateTileSnapshots( tile_idx );
 
 	CNativeTexture *texture = mBoundTexture[0];
 	if (texture == nullptr)
 		return;
 
-	// NB: we have to do this after UpdateTileSnapshot, as it set up mTileTopLeft etc.
-	// We have to do it before PrepareRenderState, because those values are applied to the graphics state.
 	PrepareTexRectUVs(&st0, &st1);
-	
+
 	v2 uv0( (float)st0.s / 32.f, (float)st0.t / 32.f );
 	v2 uv1( (float)st1.s / 32.f, (float)st1.t / 32.f );
 
 	v2 screen0;
 	v2 screen1;
-	
+
 	if( gGlobalPreferences.ViewportType == VT_FULLSCREEN_HD )
 	{
 		screen0.x = roundf( roundf( HD_SCALE * xy0.x ) * mN64ToScreenScale.x + 40 );
 		screen0.y = roundf( roundf( xy0.y )            * mN64ToScreenScale.y + mN64ToScreenTranslate.y );
 
-		screen1.x = roundf( roundf( HD_SCALE * xy1.x ) * mN64ToScreenScale.x + 40 ); 
+		screen1.x = roundf( roundf( HD_SCALE * xy1.x ) * mN64ToScreenScale.x + 40 );
 		screen1.y = roundf( roundf( xy1.y )            * mN64ToScreenScale.y + mN64ToScreenTranslate.y );
 	}
 	else
@@ -803,53 +865,56 @@ void RendererCTR::TexRect(u32 tile_idx, const v2 & xy0, const v2 & xy1, TexCoord
 	float scale_x = texture->GetScaleX();
 	float scale_y = texture->GetScaleY();
 
-	DaedalusVtx p_vertices[4];
+	DaedalusVtx p_vertices[6];
 
 	p_vertices[0].Texture.x = uv0.x * scale_x;
 	p_vertices[0].Texture.y = uv0.y * scale_y;
-	p_vertices[1].Texture.x = uv1.x * scale_x;
-	p_vertices[1].Texture.y = uv0.y * scale_y;
-	p_vertices[2].Texture.x = uv0.x * scale_x;
-	p_vertices[2].Texture.y = uv1.y * scale_y;
-	p_vertices[3].Texture.x = uv1.x * scale_x;
-	p_vertices[3].Texture.y = uv1.y * scale_y;
-	
 	p_vertices[0].Position.x = screen0.x;
 	p_vertices[0].Position.y = screen0.y;
 	p_vertices[0].Position.z = depth;
 	p_vertices[0].Colour = c32(0xffffffff);
 
+	p_vertices[1].Texture.x = uv1.x * scale_x;
+	p_vertices[1].Texture.y = uv0.y * scale_y;
 	p_vertices[1].Position.x = screen1.x;
 	p_vertices[1].Position.y = screen0.y;
 	p_vertices[1].Position.z = depth;
 	p_vertices[1].Colour = c32(0xffffffff);
 
+	p_vertices[2].Texture.x = uv0.x * scale_x;
+	p_vertices[2].Texture.y = uv1.y * scale_y;
 	p_vertices[2].Position.x = screen0.x;
 	p_vertices[2].Position.y = screen1.y;
 	p_vertices[2].Position.z = depth;
 	p_vertices[2].Colour = c32(0xffffffff);
 
-	p_vertices[3].Position.x = screen1.x;
-	p_vertices[3].Position.y = screen1.y;
-	p_vertices[3].Position.z = depth;
-	p_vertices[3].Colour = c32(0xffffffff);
+	p_vertices[3] = p_vertices[2];
+	p_vertices[4] = p_vertices[1];
 
-	ApplyTexture2DState(true);
+	p_vertices[5].Texture.x = uv1.x * scale_x;
+	p_vertices[5].Texture.y = uv1.y * scale_y;
+	p_vertices[5].Position.x = screen1.x;
+	p_vertices[5].Position.y = screen1.y;
+	p_vertices[5].Position.z = depth;
+	p_vertices[5].Colour = c32(0xffffffff);
 
-	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 4, GL_TRIANGLE_STRIP, gRDPOtherMode.depth_source ? false : true);
+	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 6, GPU_TRIANGLES, gRDPOtherMode.depth_source ? false : true);
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::AddDlRect(svcGetSystemTick() - r_t0);
+#endif
 }
 
 void RendererCTR::TexRectFlip(u32 tile_idx, const v2 & xy0, const v2 & xy1, TexCoord st0, TexCoord st1)
 {
-	// FIXME(strmnnrmn): in copy mode, depth buffer is always disabled. Might not need to check this explicitly.
+#ifdef DAEDALUS_CTR_XRAY
+	const u64 r_t0 = svcGetSystemTick();
+#endif
 	UpdateTileSnapshots( tile_idx );
 
 	CNativeTexture *texture = mBoundTexture[0];
 	if (texture == nullptr)
 		return;
 
-	// NB: we have to do this after UpdateTileSnapshot, as it set up mTileTopLeft etc.
-	// We have to do it before PrepareRenderState, because those values are applied to the graphics state.
 	PrepareTexRectUVs(&st0, &st1);
 
 	v2 uv0( (float)st0.s / 32.f, (float)st0.t / 32.f );
@@ -863,7 +928,7 @@ void RendererCTR::TexRectFlip(u32 tile_idx, const v2 & xy0, const v2 & xy1, TexC
 	float scale_x = texture->GetScaleX();
 	float scale_y = texture->GetScaleY();
 
-	DaedalusVtx p_vertices[4];
+	DaedalusVtx p_vertices[6];
 
 	p_vertices[0].Position.x = screen0.x;
 	p_vertices[0].Position.y = screen0.y;
@@ -886,16 +951,20 @@ void RendererCTR::TexRectFlip(u32 tile_idx, const v2 & xy0, const v2 & xy1, TexC
 	p_vertices[2].Texture.x = uv1.x * scale_x;
 	p_vertices[2].Texture.y = uv0.y * scale_y;
 
-	p_vertices[3].Position.x = screen1.x;
-	p_vertices[3].Position.y = screen1.y;
-	p_vertices[3].Position.z = 0.0f;
-	p_vertices[3].Colour = c32(0xffffffff);
-	p_vertices[3].Texture.x = uv1.x * scale_x;
-	p_vertices[3].Texture.y = uv1.y * scale_y;
+	p_vertices[3] = p_vertices[2];
+	p_vertices[4] = p_vertices[1];
 
-	ApplyTexture2DState(true);
+	p_vertices[5].Position.x = screen1.x;
+	p_vertices[5].Position.y = screen1.y;
+	p_vertices[5].Position.z = 0.0f;
+	p_vertices[5].Colour = c32(0xffffffff);
+	p_vertices[5].Texture.x = uv1.x * scale_x;
+	p_vertices[5].Texture.y = uv1.y * scale_y;
 
-	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 4, GL_TRIANGLE_STRIP, gRDPOtherMode.depth_source ? false : true);
+	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 6, GPU_TRIANGLES, gRDPOtherMode.depth_source ? false : true);
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::AddDlRect(svcGetSystemTick() - r_t0);
+#endif
 }
 
 void RendererCTR::FillRect(const v2 & xy0, const v2 & xy1, u32 color)
@@ -904,35 +973,57 @@ void RendererCTR::FillRect(const v2 & xy0, const v2 & xy1, u32 color)
 	v2 screen1;
 	ScaleN64ToScreen( xy0, screen0 );
 	ScaleN64ToScreen( xy1, screen1 );
-	
-	DaedalusVtx p_vertices[4];
-	
+
+	// Hardware DMA fast-path: a full-screen opaque CYCLE_FILL FillRect is a color clear;
+	// use GX_MemoryFill via C3D_RenderTargetClear instead of rasterizing 96,000 pixels!
+	if (gRDPOtherMode.cycle_type == CYCLE_FILL &&
+		screen0.x <= 0.5f && screen0.y <= 0.5f &&
+		screen1.x >= (float)mScreenWidth - 0.5f && screen1.y >= (float)mScreenHeight - 0.5f &&
+		Citro3D::IsScissorFullScreen(400, 240))
+	{
+		const c32 c(color);
+		const u32 clearRGBA8 = ((u32)c.GetR() << 24) |
+		                       ((u32)c.GetG() << 16) |
+		                       ((u32)c.GetB() << 8)  |
+		                       ((u32)c.GetA());
+		Citro3D::Clear(true, false, clearRGBA8);
+		return;
+	}
+
+	DaedalusVtx p_vertices[6];
+
 	p_vertices[0].Position.x = screen0.x;
 	p_vertices[0].Position.y = screen0.y;
 	p_vertices[0].Position.z = 0.0f;
 	p_vertices[0].Colour = c32(color);
+	p_vertices[0].Texture.x = 0.0f;
+	p_vertices[0].Texture.y = 0.0f;
 
 	p_vertices[1].Position.x = screen1.x;
 	p_vertices[1].Position.y = screen0.y;
 	p_vertices[1].Position.z = 0.0f;
 	p_vertices[1].Colour = c32(color);
+	p_vertices[1].Texture.x = 0.0f;
+	p_vertices[1].Texture.y = 0.0f;
 
 	p_vertices[2].Position.x = screen0.x;
 	p_vertices[2].Position.y = screen1.y;
 	p_vertices[2].Position.z = 0.0f;
 	p_vertices[2].Colour = c32(color);
+	p_vertices[2].Texture.x = 0.0f;
+	p_vertices[2].Texture.y = 0.0f;
 
-	p_vertices[3].Position.x = screen1.x;
-	p_vertices[3].Position.y = screen1.y;
-	p_vertices[3].Position.z = 0.0f;
-	p_vertices[3].Colour = c32(color);
-	
-	ApplyTexture2DState(false);
-	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	p_vertices[3] = p_vertices[2];
+	p_vertices[4] = p_vertices[1];
 
-	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 4, GL_TRIANGLE_STRIP, true);
+	p_vertices[5].Position.x = screen1.x;
+	p_vertices[5].Position.y = screen1.y;
+	p_vertices[5].Position.z = 0.0f;
+	p_vertices[5].Colour = c32(color);
+	p_vertices[5].Texture.x = 0.0f;
+	p_vertices[5].Texture.y = 0.0f;
 
-	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 6, GPU_TRIANGLES, true);
 }
 
 void RendererCTR::Draw2DTexture(f32 x0, f32 y0, f32 x1, f32 y1,
@@ -941,11 +1032,12 @@ void RendererCTR::Draw2DTexture(f32 x0, f32 y0, f32 x1, f32 y1,
 {
 	if (texture == nullptr)
 		return;
-	InstallNativeTexture(texture);
+	mFastStateValid = false;
+	InstallNativeTexture(texture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE, 0);
 
 	float scale_x = texture->GetScaleX();
 	float scale_y = texture->GetScaleY();
-	
+
 	float sx0 = N64ToScreenX(x0);
 	float sy0 = N64ToScreenY(y0);
 
@@ -982,7 +1074,7 @@ void RendererCTR::Draw2DTexture(f32 x0, f32 y0, f32 x1, f32 y1,
 	p_vertices[3].Texture.x = u1 * scale_x;
 	p_vertices[3].Texture.y = v1 * scale_y;
 
-	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 4, GL_TRIANGLE_STRIP, true);
+	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 4, GPU_TRIANGLE_STRIP, true);
 }
 
 void RendererCTR::Draw2DTextureR(f32 x0, f32 y0, f32 x1, f32 y1, f32 x2,
@@ -991,13 +1083,14 @@ void RendererCTR::Draw2DTextureR(f32 x0, f32 y0, f32 x1, f32 y1, f32 x2,
 {
 	if (texture == nullptr)
 		return;
-	InstallNativeTexture(texture);
-	
+	mFastStateValid = false;
+	InstallNativeTexture(texture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE, 0);
+
 	float scale_x = texture->GetScaleX();
 	float scale_y = texture->GetScaleY();
 
 	DaedalusVtx p_vertices[4];
-	
+
 	p_vertices[0].Position.x = N64ToScreenX(x0);
 	p_vertices[0].Position.y = N64ToScreenY(y0);
 	p_vertices[0].Position.z = 0.0f;
@@ -1025,8 +1118,8 @@ void RendererCTR::Draw2DTextureR(f32 x0, f32 y0, f32 x1, f32 y1, f32 x2,
 	p_vertices[3].Colour = c32(0xffffffff);
 	p_vertices[3].Texture.x = 0.0f;
 	p_vertices[3].Texture.y = t * scale_y;
-	
-	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 4, GL_TRIANGLE_FAN, true);
+
+	RenderUsingCurrentBlendMode(mScreenToDevice.mRaw, p_vertices, 4, GPU_TRIANGLE_FAN, true);
 }
 
 bool CreateRenderer()

@@ -45,9 +45,10 @@ struct ScePspFMatrix4
 	float m[16];
 };
 
-#include <GL/picaGL.h>
+#include "SysCTR/Graphics/Citro3DContext.h"
+#include "SysCTR/Utility/PerfProfilerCTR.h"
 extern void sceGuSetMatrix(int type, const ScePspFMatrix4 * mtx);
-#define GU_PROJECTION GL_PROJECTION
+#define GU_PROJECTION 0
 #endif
 
 // Vertex allocation.
@@ -56,8 +57,13 @@ extern void sceGuSetMatrix(int type, const ScePspFMatrix4 * mtx);
 //   On OSX we just use malloc, though we could use a scratch allocator to simplify.
 //   On PSP we again use sceGuGetMemory.
 #ifdef DAEDALUS_CTR
-// FlushTris() is non-reentrant; a reusable scratch buffer eliminates hundreds
-// of per-draw-call malloc/free round-trips every frame on Old 3DS.
+// FlushTris() is non-reentrant; prefer zero-copy allocation straight into the
+// linear GPU vertex pool (gVtxBuffer) so PrepareTrisUnclipped writes once and
+// RendererCTR::DrawPrimitives skips memcpy completely.
+extern DaedalusVtx * gVtxBuffer;
+extern uint32_t      gVertexCount;
+extern uint32_t      gMaxVertices;
+
 static const u32   kTempVertScratchCapacity = 512;
 static DaedalusVtx sTempVertScratch[kTempVertScratchCapacity];
 #endif
@@ -67,13 +73,16 @@ struct TempVerts
 	TempVerts()
 	:	Verts(nullptr)
 	,	Count(0)
+#ifdef DAEDALUS_CTR
+	,	OwnedHeap(false)
+#endif
 	{
 	}
 
 	~TempVerts()
 	{
 #if defined(DAEDALUS_CTR)
-		if (Verts != sTempVertScratch)
+		if (OwnedHeap)
 			free(Verts);
 #elif defined(DAEDALUS_GL)
 		free(Verts);
@@ -86,10 +95,20 @@ struct TempVerts
 		u32 bytes {count * sizeof(DaedalusVtx)};
 		Verts = static_cast<DaedalusVtx*>(sceGuGetMemory(bytes));
 #elif defined(DAEDALUS_CTR)
-		if (count <= kTempVertScratchCapacity)
+		OwnedHeap = false;
+		if (gVtxBuffer != nullptr && count <= gMaxVertices && gVertexCount <= gMaxVertices - count)
+		{
+			Verts = gVtxBuffer;
+		}
+		else if (count <= kTempVertScratchCapacity)
+		{
 			Verts = sTempVertScratch;
+		}
 		else
+		{
 			Verts = static_cast<DaedalusVtx*>(malloc(count * sizeof(DaedalusVtx)));
+			OwnedHeap = (Verts != nullptr);
+		}
 #elif defined(DAEDALUS_GL)
 		u32 bytes {count * sizeof(DaedalusVtx)};
 		Verts = static_cast<DaedalusVtx*>(malloc(bytes));
@@ -101,6 +120,9 @@ struct TempVerts
 
 	DaedalusVtx *	Verts;
 	u32				Count {};
+#ifdef DAEDALUS_CTR
+	bool			OwnedHeap;
+#endif
 };
 
 
@@ -283,6 +305,9 @@ void BaseRenderer::Reset()
 //*****************************************************************************
 void BaseRenderer::BeginScene()
 {
+#ifdef DAEDALUS_CTR_XRAY
+	const u64 t0 = svcGetSystemTick();
+#endif
 	CGraphicsContext::Get()->BeginFrame();
 
 	RestoreRenderStates();
@@ -292,6 +317,9 @@ void BaseRenderer::BeginScene()
 #endif
 
 	InitViewport();
+#ifdef DAEDALUS_CTR_XRAY
+	PerfCTR::AddDlBegin(svcGetSystemTick() - t0);
+#endif
 }
 
 //*****************************************************************************
@@ -436,7 +464,9 @@ void BaseRenderer::UpdateViewport()
 
 	sceGuOffset(vx - (vp_w/2),vy - (vp_h/2));
 	sceGuViewport(vx + vp_x, vy + vp_y, vp_w, vp_h);
-#elif defined(DAEDALUS_GL) || defined(DAEDALUS_CTR)
+#elif defined(DAEDALUS_CTR)
+	Citro3D::SetViewportLandscape((s32)mN64ToScreenTranslate.x + vp_x, (s32)mScreenHeight - (vp_h + vp_y), vp_w, vp_h);
+#elif defined(DAEDALUS_GL)
 	glViewport(mN64ToScreenTranslate.x + vp_x, (s32)mScreenHeight - (vp_h + vp_y), vp_w, vp_h);
 #else
 #ifdef DAEDALUS_DEBUG_CONSOLE
@@ -1141,6 +1171,7 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 		_TnLVFPU_Plight( &mat_world, &mat_world_project, pVtxBase, &mVtxProjected[v0], n, &mTnL );
 	}
 #elif defined(DAEDALUS_CTR)
+	const u64 vtx_t0 = svcGetSystemTick();
 	mVtxPackedColourValid = true;
 
 	DAEDALUS_STATIC_ASSERT( sizeof(FiddledVtx) == 16 );
@@ -1218,7 +1249,7 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 			"bne    2b\n\t"
 
 			"fmxr   fpscr, %[old_f]\n\t"
-			: [ps] "+r" (p_src), [pd] "+r" (p_dst),
+			: [ps] "+&r" (p_src), [pd] "+&r" (p_dst),
 			  [old_f] "=&r" (old_fpscr), [vec_f] "=&r" (vec_fpscr),
 			  [cnt] "=&r" (cnt), [vx] "=&r" (vx_i), [vy] "=&r" (vy_i), [vz] "=&r" (vz_i)
 			: [mwp] "r" (mat_world_project.mRaw), [mw] "r" (mat_world.mRaw),
@@ -1301,7 +1332,10 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 				const f32 len_sq = nx * nx + ny * ny + nz * nz;
 				if (len_sq > 1e-12f)
 				{
-					const f32 inv_len = 1.0f / sqrtf(len_sq);
+					union { f32 f; u32 i; } u;
+					u.f = len_sq;
+					u.i = 0x5f3759dfu - (u.i >> 1);
+					const f32 inv_len = u.f * (1.5f - 0.5f * len_sq * u.f * u.f);
 					nx *= inv_len;
 					ny *= inv_len;
 					nz *= inv_len;
@@ -1337,7 +1371,10 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 				const f32 len_sq = nx * nx + ny * ny + nz * nz;
 				if (len_sq > 1e-12f)
 				{
-					const f32 inv_len = 1.0f / sqrtf(len_sq);
+					union { f32 f; u32 i; } u;
+					u.f = len_sq;
+					u.i = 0x5f3759dfu - (u.i >> 1);
+					const f32 inv_len = u.f * (1.5f - 0.5f * len_sq * u.f * u.f);
 					nx *= inv_len;
 					ny *= inv_len;
 				}
@@ -1361,6 +1398,7 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 			}
 		}
 	}
+	PerfCTR::AddVtx(svcGetSystemTick() - vtx_t0);
 #else
 	// Transform and Project + Lighting or Transform and Project with Colour
 	//
@@ -2079,6 +2117,9 @@ void BaseRenderer::UpdateTileSnapshot( u32 index, u32 tile_idx )
 	// Avoid texture update, if texture is the same as last time around.
 	if( mBoundTexture[ index ] == nullptr || mBoundTextureInfo[ index ] != ti )
 	{
+#ifdef DAEDALUS_CTR
+		const u64 tex_t0 = svcGetSystemTick();
+#endif
 		// // Check for 0 width/height textures
 		// if( ti.GetWidth() == 0 || ti.GetHeight() == 0 )
 		// {
@@ -2103,6 +2144,9 @@ void BaseRenderer::UpdateTileSnapshot( u32 index, u32 tile_idx )
 #endif
 			// }
 		}
+#ifdef DAEDALUS_CTR
+		PerfCTR::AddTex(svcGetSystemTick() - tex_t0);
+#endif
 	}
 
 	// Initialise the clamping state. When the mask is 0, it forces clamp mode.
@@ -2110,6 +2154,9 @@ void BaseRenderer::UpdateTileSnapshot( u32 index, u32 tile_idx )
 #ifdef DAEDALUS_PSP
 	u32 mode_u = (u32)((rdp_tile.clamp_s || (rdp_tile.mask_s == 0)) ? GU_CLAMP : GU_REPEAT);
 	u32 mode_v = (u32)((rdp_tile.clamp_t || (rdp_tile.mask_t == 0)) ? GU_CLAMP : GU_REPEAT);
+#elif defined(DAEDALUS_CTR)
+	u32 mode_u = (u32)((rdp_tile.clamp_s || (rdp_tile.mask_s == 0)) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
+	u32 mode_v = (u32)((rdp_tile.clamp_t || (rdp_tile.mask_t == 0)) ? GPU_CLAMP_TO_EDGE : GPU_REPEAT);
 #else
 	u32 mode_u = (u32)((rdp_tile.clamp_s || (rdp_tile.mask_s == 0)) ? GL_CLAMP : GL_REPEAT);
 	u32 mode_v = (u32)((rdp_tile.clamp_t || (rdp_tile.mask_t == 0)) ? GL_CLAMP : GL_REPEAT);
@@ -2132,6 +2179,8 @@ void BaseRenderer::UpdateTileSnapshot( u32 index, u32 tile_idx )
 		//
 #ifdef DAEDALUS_PSP
 		mode_u = g_ROM.ZELDA_HACK ? GU_CLAMP : GU_REPEAT;
+#elif defined(DAEDALUS_CTR)
+		mode_u = g_ROM.ZELDA_HACK ? GPU_CLAMP_TO_EDGE : (rdp_tile.mirror_s ? GPU_MIRRORED_REPEAT : GPU_REPEAT);
 #else
 		mode_u = g_ROM.ZELDA_HACK ? GL_CLAMP : (rdp_tile.mirror_s ? GL_MIRRORED_REPEAT : GL_REPEAT);
 #endif
@@ -2140,6 +2189,8 @@ void BaseRenderer::UpdateTileSnapshot( u32 index, u32 tile_idx )
 	if( tile_size.GetHeight() > ti.GetHeight() )
 #ifdef DAEDALUS_PSP
 		mode_v = GU_REPEAT;
+#elif defined(DAEDALUS_CTR)
+		mode_v = rdp_tile.mirror_t ? GPU_MIRRORED_REPEAT : GPU_REPEAT;
 #else
 		mode_v = rdp_tile.mirror_t ? GL_MIRRORED_REPEAT : GL_REPEAT;
 #endif
@@ -2189,6 +2240,8 @@ inline void FixUV(u32 * wrap, s16 * c0_, s16 * c1_, s16 offset, s32 size)
 	// Many texrects already have GU_CLAMP set, so avoid some work.
 #ifdef DAEDALUS_PSP
 	if (*wrap != GU_CLAMP && size > 0)
+#elif defined(DAEDALUS_CTR)
+	if (*wrap != GPU_CLAMP_TO_EDGE && size > 0)
 #else
 	if (*wrap != GL_CLAMP && size > 0)
 #endif
@@ -2213,6 +2266,8 @@ inline void FixUV(u32 * wrap, s16 * c0_, s16 * c1_, s16 offset, s32 size)
 		{
 #ifdef DAEDALUS_PSP
 			*wrap = GU_CLAMP;
+#elif defined(DAEDALUS_CTR)
+			*wrap = GPU_CLAMP_TO_EDGE;
 #else
 			*wrap = GL_CLAMP;
 #endif
@@ -2294,7 +2349,11 @@ void BaseRenderer::SetScissor( u32 x0, u32 y0, u32 x1, u32 y1 )
 	// N.B. Think the arguments are x0,y0,x1,y1, and not x,y,w,h as the docs describe
 	//printf("%d %d %d %d\n", s32(screen_tl.x),s32(screen_tl.y),s32(screen_br.x),s32(screen_br.y));
 	sceGuScissor( l, t, r, b );
-#elif defined(DAEDALUS_GL) || defined(DAEDALUS_CTR)
+#elif defined(DAEDALUS_CTR)
+	s32 w {Max<s32>( r - l, 0 )};
+	s32 h {Max<s32>( b - t, 0 )};
+	Citro3D::SetScissorLandscape(true, (s32)mN64ToScreenTranslate.x + l, (s32)mScreenHeight - (t + h), w, h);
+#elif defined(DAEDALUS_GL)
 	// NB: OpenGL is x,y,w,h. Errors if width or height is negative, so clamp this.
 	s32 w {Max<s32>( r - l, 0 )};
 	s32 h {Max<s32>( b - t, 0 )};

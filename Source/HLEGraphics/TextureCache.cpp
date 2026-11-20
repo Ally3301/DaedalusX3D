@@ -23,6 +23,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 #include "stdafx.h"
 
+#include "Core/ROM.h"
 #include "HLEGraphics/DLDebug.h"
 #include "HLEGraphics/TextureCache.h"
 #include "HLEGraphics/TextureInfo.h"
@@ -100,34 +101,47 @@ void CTextureCache::PurgeOldTextures()
 
 	const bool high_pressure = (mTextures.size() + mPendingTextures.size()) >= 256;
 
-	auto purge = [this, high_pressure](TextureVec & textures)
+#ifdef DAEDALUS_CTR
+	// On Old 3DS, scanning hundreds of cached textures every single Display List wastes
+	// ARM11 CPU time. Run full expiration sweeps every 8 RDP tasks unless under memory
+	// pressure or running games that rely on per-frame texture invalidation hacks.
+	static u32 sPurgeTick = 0;
+	const bool force_sweep = high_pressure ||
+		(g_ROM.GameHacks == WONDER_PROJECTJ2) ||
+		(g_ROM.GameHacks == WORMS_ARMAGEDDON) ||
+		((++sPurgeTick & 7u) == 0);
+	if (force_sweep)
+#endif
 	{
-		TextureVec::iterator out = textures.begin();
-		for (TextureVec::iterator it = textures.begin(); it != textures.end(); ++it)
+		auto purge = [this, high_pressure](TextureVec & textures)
 		{
-			CachedTexture * texture = *it;
-			if (texture->HasExpired(high_pressure))
+			TextureVec::iterator out = textures.begin();
+			for (TextureVec::iterator it = textures.begin(); it != textures.end(); ++it)
 			{
-				const u32 ixa = MakeHashIdxA(texture->GetTextureInfo());
-				const u32 ixb = MakeHashIdxB(texture->GetTextureInfo());
+				CachedTexture * texture = *it;
+				if (texture->HasExpired(high_pressure))
+				{
+					const u32 ixa = MakeHashIdxA(texture->GetTextureInfo());
+					const u32 ixb = MakeHashIdxB(texture->GetTextureInfo());
 
-				if (mpCacheHashTable[ixa] == texture)
-					mpCacheHashTable[ixa] = nullptr;
-				if (mpCacheHashTable[ixb] == texture)
-					mpCacheHashTable[ixb] = nullptr;
+					if (mpCacheHashTable[ixa] == texture)
+						mpCacheHashTable[ixa] = nullptr;
+					if (mpCacheHashTable[ixb] == texture)
+						mpCacheHashTable[ixb] = nullptr;
 
-				delete texture;
+					delete texture;
+				}
+				else
+				{
+					*out++ = texture;
+				}
 			}
-			else
-			{
-				*out++ = texture;
-			}
-		}
-		textures.erase(out, textures.end());
-	};
+			textures.erase(out, textures.end());
+		};
 
-	purge(mTextures);
-	purge(mPendingTextures);
+		purge(mTextures);
+		purge(mPendingTextures);
+	}
 
 	if (!mPendingTextures.empty())
 	{

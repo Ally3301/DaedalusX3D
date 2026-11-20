@@ -14,7 +14,7 @@
 #include "FrontendCTR.h"
 
 #include <3ds.h>
-#include <GL/picaGL.h>
+#include <citro3d.h>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -28,7 +28,9 @@
 #include "Config/ConfigOptions.h"
 #include "Graphics/NativeTexture.h"
 #include "HLEGraphics/BaseRenderer.h"
+#include "HLEGraphics/DaedalusVtx.h"
 #include "Interface/RomDB.h"
+#include "SysCTR/Graphics/Citro3DContext.h"
 #include "Utility/IO.h"
 #include "Utility/Preferences.h"
 #include "Utility/ROMFile.h"
@@ -285,40 +287,31 @@ namespace
 		0x0000000000000000ULL
 	};
 
-	// ---------------------------------------------------------------- batched picaGL renderer
-	// Double-buffered linear vertex pool holds all geometry for a full two-screen
+	// ---------------------------------------------------------------- batched citro3d renderer
+	// Double-buffered linear DaedalusVtx pool holds all geometry for a full two-screen
 	// frame so CPU writes to the next bank while GPU presents the previous one.
 	const u32 kHalfVerts     = 4096;
 	const u32 kMaxBatchVerts = kHalfVerts * 2;
 	const float kWhiteU = 4.0f / 128.0f;
 	const float kWhiteV = 4.0f / 64.0f;
-	float * s_vtxPos = nullptr;   // 2 floats / vertex
-	float * s_vtxUv  = nullptr;   // 2 floats / vertex
-	u32 *   s_vtxCol = nullptr;   // 1 u32 RGBA / vertex
-	u32     s_frameBank = 0;
-	u32     s_vtxOffset = 0;      // vertices already submitted in current bank
-	u32     s_batchStart = 0;     // start index of the current draw batch
-	u32     s_batchCount = 0;     // vertices queued in the current draw batch
-	GLuint  s_batchTex = 0;       // active batch texture (s_fontTex or s_previewTex)
-	GLuint  s_fontTex = 0;
+	DaedalusVtx * s_vtxPool  = nullptr;
+	u32           s_frameBank = 0;
+	u32           s_vtxOffset = 0;      // vertices already submitted in current bank
+	u32           s_batchStart = 0;     // start index of the current draw batch
+	u32           s_batchCount = 0;     // vertices queued in the current draw batch
+	C3D_Tex *     s_batchTex = nullptr; // active batch texture (s_fontTex or s_previewTex)
+	CRefPtr<CNativeTexture> s_fontTex;
 
 	bool EnsureGpuResources()
 	{
-		if (s_vtxPos == nullptr)
+		if (s_vtxPool == nullptr)
 		{
-			s_vtxPos = (float *)linearAlloc(kMaxBatchVerts * 2 * sizeof(float));
-			s_vtxUv  = (float *)linearAlloc(kMaxBatchVerts * 2 * sizeof(float));
-			s_vtxCol = (u32 *)linearAlloc(kMaxBatchVerts * sizeof(u32));
-			if (!s_vtxPos || !s_vtxUv || !s_vtxCol)
-			{
-				if (s_vtxPos) { linearFree(s_vtxPos); s_vtxPos = nullptr; }
-				if (s_vtxUv)  { linearFree(s_vtxUv);  s_vtxUv  = nullptr; }
-				if (s_vtxCol) { linearFree(s_vtxCol); s_vtxCol = nullptr; }
+			s_vtxPool = static_cast<DaedalusVtx *>(linearAlloc(kMaxBatchVerts * sizeof(DaedalusVtx)));
+			if (!s_vtxPool)
 				return false;
-			}
 		}
 
-		if (s_fontTex == 0)
+		if (s_fontTex == nullptr)
 		{
 			const u32 atlasW = 128;
 			const u32 atlasH = 64;
@@ -330,7 +323,7 @@ namespace
 				pixels[i] = 0x00FFFFFFu;
 
 			// Reserve cell 0 (' ', 8x8 at top-left) as an opaque white swatch so
-			// solid/gradient quads and glyph draws share one GL_TEXTURE_2D batch.
+			// solid/gradient quads and glyph draws share one textured batch.
 			for (u32 row = 0; row < 8; ++row)
 				for (u32 col = 0; col < 8; ++col)
 					pixels[row * atlasW + col] = 0xFFFFFFFFu;
@@ -351,61 +344,46 @@ namespace
 				}
 			}
 
-			glGenTextures(1, &s_fontTex);
-			if (s_fontTex != 0)
+			s_fontTex = CNativeTexture::Create(atlasW, atlasH, TexFmt_8888);
+			if (s_fontTex != nullptr && s_fontTex->HasData())
 			{
-				glEnable(GL_TEXTURE_2D);
-				glBindTexture(GL_TEXTURE_2D, s_fontTex);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlasW, atlasH, 0,
-					GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-				glFinish();
+				s_fontTex->SetData(pixels, nullptr);
+				s_fontTex->ApplyParams(GPU_NEAREST, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 			}
 			free(pixels);
 		}
-		return s_fontTex != 0;
+		return s_fontTex != nullptr && s_fontTex->HasData();
 	}
 
 	void FreeGpuResources()
 	{
-		if (s_fontTex != 0)
-		{
-			glDeleteTextures(1, &s_fontTex);
-			s_fontTex = 0;
-		}
-		if (s_vtxPos) { linearFree(s_vtxPos); s_vtxPos = nullptr; }
-		if (s_vtxUv)  { linearFree(s_vtxUv);  s_vtxUv  = nullptr; }
-		if (s_vtxCol) { linearFree(s_vtxCol); s_vtxCol = nullptr; }
+		s_fontTex = nullptr;
+		if (s_vtxPool) { linearFree(s_vtxPool); s_vtxPool = nullptr; }
 		s_frameBank = 0;
 		s_vtxOffset = 0;
 		s_batchStart = 0;
 		s_batchCount = 0;
-		s_batchTex = 0;
+		s_batchTex = nullptr;
 	}
 
 	void FlushBatch()
 	{
-		if (s_batchCount == 0 || !s_vtxPos)
+		if (s_batchCount == 0 || !s_vtxPool || s_fontTex == nullptr)
 			return;
 
-		// Keep GL_TEXTURE_2D continuously enabled across batches: picaGL does not
-		// re-dirty GPUREG_TEXUNIT_CONFIG on glEnable(GL_TEXTURE_2D) if the bound
-		// texture pointer is unchanged. Solid geometry samples cell 0 white texels.
-		const GLuint tex = (s_batchTex != 0) ? s_batchTex : s_fontTex;
-		glBindTexture(GL_TEXTURE_2D, tex);
-		glDrawArrays(GL_TRIANGLES, (GLint)s_batchStart, (GLsizei)s_batchCount);
+		C3D_Tex * tex = (s_batchTex != nullptr) ? s_batchTex : s_fontTex->GetC3DTexture();
+		Citro3D::SetTextureEnabled(true);
+		Citro3D::BindTexture(tex);
+		Citro3D::DrawArrays(GPU_TRIANGLES, (int)s_batchStart, (int)s_batchCount);
 		s_vtxOffset += s_batchCount;
 		s_batchStart = s_vtxOffset;
 		s_batchCount = 0;
 	}
 
-	void SetBatchTexture(GLuint tex)
+	void SetBatchTexture(C3D_Tex * tex)
 	{
-		if (tex == 0)
-			tex = s_fontTex;
+		if (tex == nullptr && s_fontTex != nullptr)
+			tex = s_fontTex->GetC3DTexture();
 		if (s_batchTex != tex)
 		{
 			FlushBatch();
@@ -415,14 +393,17 @@ namespace
 
 	bool ReserveVerts(u32 needed)
 	{
-		if (!s_vtxPos || needed > kHalfVerts)
+		if (!s_vtxPool || needed > kHalfVerts)
 			return false;
 		const u32 bankBase = s_frameBank * kHalfVerts;
 		const u32 bankEnd  = bankBase + kHalfVerts;
 		if (s_batchStart + s_batchCount + needed > bankEnd)
 		{
 			FlushBatch();
-			glFinish();
+			if (s_vtxOffset > bankBase)
+				Citro3D::FlushDataCache(&s_vtxPool[bankBase], (s_vtxOffset - bankBase) * sizeof(DaedalusVtx));
+			C3D_FrameSplit(GX_CMDLIST_FLUSH);
+			C3D_FrameSync();
 			s_vtxOffset = bankBase;
 			s_batchStart = bankBase;
 			s_batchCount = 0;
@@ -432,17 +413,18 @@ namespace
 
 	static inline void PushVert(float x, float y, float u, float v, u32 col)
 	{
-		const u32 idx = s_batchStart + s_batchCount++;
-		s_vtxPos[idx * 2 + 0] = x;
-		s_vtxPos[idx * 2 + 1] = y;
-		s_vtxUv[idx * 2 + 0]  = u;
-		s_vtxUv[idx * 2 + 1]  = v;
-		s_vtxCol[idx]         = col;
+		DaedalusVtx & dst = s_vtxPool[s_batchStart + s_batchCount++];
+		dst.Texture.x  = u;
+		dst.Texture.y  = v;
+		dst.Colour     = c32(col);
+		dst.Position.x = x;
+		dst.Position.y = y;
+		dst.Position.z = 0.0f;
 	}
 
 	void QuadGrad(float x, float y, float w, float h, u32 cTL, u32 cTR, u32 cBL, u32 cBR)
 	{
-		SetBatchTexture(s_fontTex);
+		SetBatchTexture(s_fontTex ? s_fontTex->GetC3DTexture() : nullptr);
 		if (!ReserveVerts(6)) return;
 		const float x1 = x + w;
 		const float y1 = y + h;
@@ -466,7 +448,7 @@ namespace
 
 	void DiagLine(float x0, float y0, float x1, float y1, float halfW, u32 col)
 	{
-		SetBatchTexture(s_fontTex);
+		SetBatchTexture(s_fontTex ? s_fontTex->GetC3DTexture() : nullptr);
 		if (!ReserveVerts(6)) return;
 		PushVert(x0 - halfW, y0, kWhiteU, kWhiteV, col);
 		PushVert(x0 + halfW, y0, kWhiteU, kWhiteV, col);
@@ -476,10 +458,10 @@ namespace
 		PushVert(x1 - halfW, y1, kWhiteU, kWhiteV, col);
 	}
 
-	void DrawTexturedQuad(GLuint tex, float x, float y, float w, float h,
+	void DrawTexturedQuad(C3D_Tex * tex, float x, float y, float w, float h,
 		float u0, float v0, float u1, float v1, u32 col = 0xFFFFFFFFu)
 	{
-		if (tex == 0) return;
+		if (tex == nullptr) return;
 		SetBatchTexture(tex);
 		if (!ReserveVerts(6)) return;
 		const float x1 = x + w;
@@ -494,9 +476,9 @@ namespace
 
 	void DrawText(float x, float y, const char * s, u32 color, float scale = 1.0f)
 	{
-		if (!s || !s[0] || s_fontTex == 0)
+		if (!s || !s[0] || s_fontTex == nullptr)
 			return;
-		SetBatchTexture(s_fontTex);
+		SetBatchTexture(s_fontTex->GetC3DTexture());
 		const float adv = 8.0f * scale;
 		const float invW = 1.0f / 128.0f;
 		const float invH = 1.0f / 64.0f;
@@ -607,56 +589,34 @@ namespace
 		s_vtxOffset = bankBase;
 		s_batchStart = bankBase;
 		s_batchCount = 0;
-		s_batchTex = s_fontTex;
+		s_batchTex = s_fontTex ? s_fontTex->GetC3DTexture() : nullptr;
+		Citro3D::BeginUIFrame();
 	}
 
 	void BeginScreen(gfxScreen_t screen, int w, int h)
 	{
 		FlushBatch();
-		pglSelectScreen(screen, GFX_LEFT);
-		glDisable(GL_SCISSOR_TEST);
-		glDisable(GL_DEPTH_TEST);
-		glDisable(GL_CULL_FACE);
-		glDisable(GL_ALPHA_TEST);
-		glDisable(GL_FOG);
-		glDepthMask(GL_FALSE);
-		glEnable(GL_BLEND);
-		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		glEnable(GL_TEXTURE_2D);
-		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-		// Force picaGL to re-dirty GPUREG_TEXUNIT_CONFIG after any external
-		// GL_TEXTURE_2D disable (e.g. gameplay FillRect) before batching.
-		glBindTexture(GL_TEXTURE_2D, 0);
-		glBindTexture(GL_TEXTURE_2D, s_fontTex);
-		s_batchTex = s_fontTex;
-		glViewport(0, 0, w, h);
-
-		glMatrixMode(GL_PROJECTION);
-		glLoadIdentity();
-		glOrtho(0, (GLdouble)w, (GLdouble)h, 0, -1, 1);
-
-		glMatrixMode(GL_MODELVIEW);
-		glLoadIdentity();
-
-		glEnableClientState(GL_VERTEX_ARRAY);
-		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-		glEnableClientState(GL_COLOR_ARRAY);
-		glVertexPointer(2, GL_FLOAT, 0, s_vtxPos);
-		glTexCoordPointer(2, GL_FLOAT, 0, s_vtxUv);
-		glColorPointer(4, GL_UNSIGNED_BYTE, 0, s_vtxCol);
-
 		const u32 bg = ActiveTheme().bg;
-		glClearColor((bg & 255) / 255.0f, ((bg >> 8) & 255) / 255.0f,
-			((bg >> 16) & 255) / 255.0f, 1.0f);
-		glClear(GL_COLOR_BUFFER_BIT);
+		// Convert ABGR (RGBA helper) to 0xRRGGBBAA for C3D_RenderTargetClear.
+		const u32 clearRGBA8 = ((bg & 0xFFu) << 24) |
+		                       (((bg >> 8) & 0xFFu) << 16) |
+		                       (((bg >> 16) & 0xFFu) << 8) |
+		                       0xFFu;
+		Citro3D::BeginUIScreen(screen, w, h, clearRGBA8);
+		Citro3D::SetVertexBuffer(s_vtxPool, sizeof(DaedalusVtx));
+		s_batchTex = s_fontTex ? s_fontTex->GetC3DTexture() : nullptr;
+		if (s_batchTex)
+			Citro3D::BindTexture(s_batchTex);
 	}
 
 	void PresentBothScreens()
 	{
 		FlushBatch();
-		// Single swap for both screens avoids double GX stalls and keeps top
-		// and bottom frames locked to the same VBlank.
-		pglSwapBuffersEx(1, 1);
+		const u32 bankBase = s_frameBank * kHalfVerts;
+		if (s_vtxPool && s_vtxOffset > bankBase)
+			Citro3D::FlushDataCache(&s_vtxPool[bankBase], (s_vtxOffset - bankBase) * sizeof(DaedalusVtx));
+		// Single C3D_FrameEnd submits both screens on the same VBlank.
+		Citro3D::EndUIFrame();
 	}
 
 	// ---------------------------------------------------------------- PSX3D visuals
@@ -753,7 +713,7 @@ namespace
 		bool primary;
 	};
 
-	void DrawButtonBar(const BarBtn * btns, int count)
+	void DrawButtonBar(const BarBtn * btns, int count, int pressedIdx = -1)
 	{
 		const Theme & t = ActiveTheme();
 		const float barY = 212.0f;
@@ -764,26 +724,124 @@ namespace
 		for (int i = 0; i < count; ++i)
 		{
 			const float bx = bw * i;
-			if (btns[i].primary)
+			const bool pressed = (i == pressedIdx);
+			if (pressed)
+			{
+				QuadVGrad(bx + 1.0f, barY + 1.0f, bw - 2.0f, barH - 2.0f, t.hlBottom, t.hlTop);
+				Quad(bx + 1.0f, barY + 1.0f, bw - 2.0f, 2.0f, t.accent[1]);
+			}
+			else if (btns[i].primary)
+			{
 				QuadVGrad(bx, barY + 1.0f, bw, barH - 1.0f, t.hlTop, t.hlBottom);
+				Quad(bx, barY + 1.0f, bw, 1.0f, WithAlpha(t.accent[3], 180));
+			}
 			else if (i > 0)
+			{
 				Quad(bx, barY + 5.0f, 1.0f, barH - 10.0f, t.rule);
+			}
 
-			const u32 col = btns[i].primary ? t.text : t.textDim;
+			const u32 col = (btns[i].primary || pressed) ? t.text : t.textDim;
 			DrawCenteredText(bx + bw * 0.5f, barY + 5.0f, btns[i].key,
-				btns[i].primary ? t.accent[1] : t.value, 0.75f);
+				(btns[i].primary || pressed) ? t.accent[1] : t.value, 0.75f);
 			DrawCenteredText(bx + bw * 0.5f, barY + 16.0f, btns[i].label, col, 0.75f);
 		}
 	}
 
-	int HitButtonBar(const touchPosition & tp, int count)
+	int HitButtonBar(int px, int py, int count)
 	{
-		if (tp.py < 212 || count <= 0)
+		if (py < 212 || py >= 240 || px < 0 || px >= 320 || count <= 0)
 			return -1;
-		int idx = (tp.px * count) / 320;
+		int idx = (px * count) / 320;
 		if (idx < 0) idx = 0;
 		if (idx >= count) idx = count - 1;
 		return idx;
+	}
+
+	// ---------------------------------------------------------------- touch state tracker
+	// Robust 3DS touch handling:
+	// - Filters invalid (0,0) touch frames reported on edge transitions.
+	// - Distinguishes taps (triggered on clean release) from drag scrolling.
+	// - Tracks vertical drag deltas and smoothed kinetic release velocity.
+	struct TouchState
+	{
+		bool  active;
+		bool  justPressed;
+		bool  justReleased;
+		bool  dragged;
+		bool  scrollbarDrag;
+		int   startX, startY;
+		int   curX, curY;
+		int   prevX, prevY;
+		int   releaseX, releaseY;
+		float deltaY;
+		float velY;
+
+		void Reset()
+		{
+			std::memset(this, 0, sizeof(*this));
+		}
+
+		void Update(u32 down, u32 held)
+		{
+			justPressed = false;
+			justReleased = false;
+			deltaY = 0.0f;
+
+			if (held & KEY_TOUCH)
+			{
+				touchPosition tp;
+				hidTouchRead(&tp);
+				const bool validCoord = (tp.px > 0 || tp.py > 0) && tp.px < 320 && tp.py < 240;
+				if (!active)
+				{
+					if (validCoord)
+					{
+						active = true;
+						justPressed = true;
+						dragged = false;
+						scrollbarDrag = false;
+						startX = curX = prevX = tp.px;
+						startY = curY = prevY = tp.py;
+						velY = 0.0f;
+					}
+				}
+				else if (validCoord)
+				{
+					prevX = curX;
+					prevY = curY;
+					curX = tp.px;
+					curY = tp.py;
+					const int dx = curX - startX;
+					const int dy = curY - startY;
+					if (!dragged && (dx * dx + dy * dy >= 64)) // 8px drag threshold
+						dragged = true;
+					deltaY = (float)(curY - prevY);
+					velY = velY * 0.5f + deltaY * 0.5f;
+				}
+			}
+			else
+			{
+				if (active)
+				{
+					justReleased = true;
+					releaseX = curX;
+					releaseY = curY;
+				}
+				active = false;
+				scrollbarDrag = false;
+			}
+			(void)down;
+		}
+	};
+
+	void DrawPill(float x, float y, float w, float h, const char * label, u32 fillCol, u32 borderCol, u32 textCol, float scale = 0.75f)
+	{
+		Quad(x, y, w, h, fillCol);
+		Quad(x, y, w, 1.0f, borderCol);
+		Quad(x, y + h - 1.0f, w, 1.0f, borderCol);
+		Quad(x, y, 1.0f, h, borderCol);
+		Quad(x + w - 1.0f, y, 1.0f, h, borderCol);
+		DrawCenteredText(x + w * 0.5f, y + (h - 8.0f * scale) * 0.5f, label, textCol, scale);
 	}
 
 	// ---------------------------------------------------------------- input repeat
@@ -978,17 +1036,49 @@ namespace
 		s_hlVel = 0.0f;
 	}
 
+	int s_previewPendingRomIdx = -1;
+	int s_previewDelayFrames = 0;
+
 	void ReleasePreview()
 	{
 		s_previewTex = nullptr;
 		s_previewRomIdx = -1;
+		s_previewPendingRomIdx = -1;
+		s_previewDelayFrames = 0;
 	}
 
-	void UpdatePreviewForRom(int romIdx)
+	void RequestPreviewForRom(int romIdx, bool immediate = false)
 	{
+		if (romIdx == s_previewRomIdx && s_previewPendingRomIdx == -1)
+			return;
+		if (immediate)
+		{
+			s_previewPendingRomIdx = romIdx;
+			s_previewDelayFrames = 0;
+			return;
+		}
+		if (s_previewPendingRomIdx != romIdx)
+		{
+			s_previewPendingRomIdx = romIdx;
+			s_previewDelayFrames = 8; // debounce SD PNG decode (~133ms) while scrolling fast
+		}
+	}
+
+	void TickPreviewLoader()
+	{
+		if (s_previewPendingRomIdx == -1)
+			return;
+		if (s_previewDelayFrames > 0)
+		{
+			--s_previewDelayFrames;
+			return;
+		}
+		const int romIdx = s_previewPendingRomIdx;
+		s_previewPendingRomIdx = -1;
 		if (romIdx == s_previewRomIdx)
 			return;
-		ReleasePreview();
+
+		s_previewTex = nullptr;
 		s_previewRomIdx = romIdx;
 		if (romIdx < 0 || romIdx >= s_romCount)
 			return;
@@ -1003,11 +1093,7 @@ namespace
 			s_previewTex = CNativeTexture::CreateFromPng(previewPath, TexFmt_5551);
 			if (s_previewTex != nullptr && s_previewTex->HasData())
 			{
-				s_previewTex->InstallTexture();
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+				s_previewTex->ApplyParams(GPU_LINEAR, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 			}
 		}
 	}
@@ -1194,44 +1280,94 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 	bool pending_fps = gGlobalPreferences.DisplayFramerate;
 	EViewportType pending_viewport = gGlobalPreferences.ViewportType;
 	int selection = 0;
-	int scroll = 0;
+	float scrollPos = 0.0f;
+	float scrollVel = 0.0f;
+	bool manualScroll = false;
 	float hl = 0.0f, hl_v = 0.0f;
 	float clock_s = 0.0f;
 	Repeat rep = {};
+	TouchState touch;
+	touch.Reset();
 	const int VISIBLE = 6;
+	const float LIST_Y = 36.0f;
+	const float ROW_H = 28.0f;
+	const float MAX_SCROLL = (float)(kNumOptions - VISIBLE);
 
-	static const BarBtn kOptBar[3] = {
-		{ "B",     "Back",   false },
-		{ "L/R",   "Change", false },
-		{ "START", "Save",   true  }
+	static const BarBtn kOptBar[4] = {
+		{ "B",     "Back", false },
+		{ "L",     "-",    false },
+		{ "R",     "+",    false },
+		{ "START", "Save", true  }
 	};
 
 	while (aptMainLoop() && !shouldQuit)
 	{
-		gspWaitForVBlank();
+		// C3D_FrameEnd syncs to VBlank; avoid double gspWaitForVBlank() stall.
 		hidScanInput();
 		u32 down = hidKeysDown();
 		const u32 held = hidKeysHeld();
 		clock_s += 1.0f / 60.0f;
+		touch.Update(down, held);
 
-		if (down & KEY_TOUCH)
+		int pressedBar = -1;
+		int pressedRow = -1;
+		if (touch.active)
 		{
-			touchPosition tp;
-			hidTouchRead(&tp);
-			const int barHit = HitButtonBar(tp, 3);
-			if (barHit == 0) down |= KEY_B;
-			else if (barHit == 1) down |= KEY_RIGHT;
-			else if (barHit == 2) down |= KEY_START;
-			else
+			if (!touch.dragged)
+				pressedBar = HitButtonBar(touch.curX, touch.curY, 4);
+
+			if (touch.justPressed && touch.curX >= 294 && touch.curY >= (int)LIST_Y && touch.curY < 210)
+				touch.scrollbarDrag = true;
+
+			if (touch.scrollbarDrag)
 			{
-				const int row = (tp.py - 36) / 28;
-				if (row >= 0 && row < VISIBLE)
+				float frac = ((float)touch.curY - LIST_Y) / (VISIBLE * ROW_H);
+				if (frac < 0.0f) frac = 0.0f;
+				if (frac > 1.0f) frac = 1.0f;
+				scrollPos = frac * MAX_SCROLL;
+				scrollVel = 0.0f;
+				manualScroll = true;
+			}
+			else if (touch.dragged && touch.startY >= (int)LIST_Y && touch.startY < 210)
+			{
+				scrollPos -= touch.deltaY / ROW_H;
+				if (scrollPos < 0.0f) scrollPos = 0.0f;
+				if (scrollPos > MAX_SCROLL) scrollPos = MAX_SCROLL;
+				scrollVel = 0.0f;
+				manualScroll = true;
+			}
+			else if (!touch.dragged && touch.curY >= (int)LIST_Y && touch.curY < (int)(LIST_Y + VISIBLE * ROW_H))
+			{
+				const int rIdx = (int)floorf(scrollPos + ((float)touch.curY - LIST_Y) / ROW_H);
+				if (rIdx >= 0 && rIdx < kNumOptions)
+					pressedRow = rIdx;
+			}
+		}
+
+		if (touch.justReleased)
+		{
+			if (touch.dragged && !touch.scrollbarDrag && touch.startY >= (int)LIST_Y && touch.startY < 210)
+			{
+				scrollVel = -(touch.velY / ROW_H) * 60.0f * 0.45f;
+				manualScroll = true;
+			}
+			else if (!touch.dragged && !touch.scrollbarDrag)
+			{
+				const int barHit = HitButtonBar(touch.releaseX, touch.releaseY, 4);
+				if (barHit == 0) down |= KEY_B;
+				else if (barHit == 1) down |= KEY_LEFT;
+				else if (barHit == 2) down |= KEY_RIGHT;
+				else if (barHit == 3) down |= KEY_START;
+				else if (touch.releaseY >= (int)LIST_Y && touch.releaseY < (int)(LIST_Y + VISIBLE * ROW_H))
 				{
-					const int idx = scroll + row;
-					if (idx < kNumOptions)
+					const int idx = (int)floorf(scrollPos + ((float)touch.releaseY - LIST_Y) / ROW_H);
+					if (idx >= 0 && idx < kNumOptions)
 					{
-						if (idx == selection) down |= KEY_A;
+						// Tapping the value pill on the right toggles immediately; tapping label selects (or toggles if already selected).
+						if (touch.releaseX >= 200 || idx == selection)
+							down |= KEY_A;
 						selection = idx;
+						manualScroll = false;
 					}
 				}
 			}
@@ -1265,12 +1401,38 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 		}
 
 		if (Pressed(rep, down, held, KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN, 0))
+		{
 			selection = (selection + 1) % kNumOptions;
+			manualScroll = false;
+		}
 		if (Pressed(rep, down, held, KEY_UP | KEY_DUP | KEY_CPAD_UP, 1))
+		{
 			selection = (selection + kNumOptions - 1) % kNumOptions;
+			manualScroll = false;
+		}
 
-		if (selection < scroll) scroll = selection;
-		if (selection >= scroll + VISIBLE) scroll = selection - VISIBLE + 1;
+		if (manualScroll)
+		{
+			if (!touch.active)
+			{
+				scrollPos += scrollVel * (1.0f / 60.0f);
+				scrollVel *= 0.86f;
+				if (fabsf(scrollVel) < 0.05f) scrollVel = 0.0f;
+			}
+			if (scrollPos < 0.0f) { scrollPos = 0.0f; scrollVel = 0.0f; }
+			if (scrollPos > MAX_SCROLL) { scrollPos = MAX_SCROLL; scrollVel = 0.0f; }
+		}
+		else
+		{
+			float targetScroll = scrollPos;
+			if ((float)selection < targetScroll) targetScroll = (float)selection;
+			if ((float)selection >= targetScroll + VISIBLE) targetScroll = (float)(selection - VISIBLE + 1);
+			if (targetScroll < 0.0f) targetScroll = 0.0f;
+			if (targetScroll > MAX_SCROLL) targetScroll = MAX_SCROLL;
+			SpringStep(scrollPos, scrollVel, targetScroll, 220.0f, 24.0f);
+			if (scrollPos < 0.0f) scrollPos = 0.0f;
+			if (scrollPos > MAX_SCROLL) scrollPos = MAX_SCROLL;
+		}
 
 		const int dir = (down & (KEY_A | KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT | KEY_R)) ? 1 :
 						(down & (KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT | KEY_L)) ? -1 : 0;
@@ -1312,66 +1474,101 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 			}
 		}
 
-		SpringStep(hl, hl_v, (float)(selection - scroll), 260.0f, 24.0f);
+		SpringStep(hl, hl_v, (float)selection, 260.0f, 24.0f);
 
 		const Theme & t = ActiveTheme();
 		BeginFrame();
 
 		// ---- Bottom screen
 		BeginScreen(GFX_BOTTOM, 320, 240);
-		DrawHeader(320.0f, "ROM Options", applyRuntime ? "In-game" : "Library");
+		char optHeaderRight[24];
+		snprintf(optHeaderRight, sizeof(optHeaderRight), "%d / %d", selection + 1, kNumOptions);
+		DrawHeader(320.0f, "ROM Options", optHeaderRight);
 
 		// Spring highlight bar
-		const float hy = 36.0f + hl * 28.0f;
-		if (hy >= 24.0f && hy <= 200.0f)
+		const float hy = LIST_Y + (hl - scrollPos) * ROW_H;
+		if (hy >= LIST_Y - ROW_H && hy <= 204.0f)
 		{
-			Quad(6.0f, hy - 1.0f, 308.0f, 28.0f, t.hlGlow);
-			QuadVGrad(8.0f, hy, 304.0f, 26.0f, t.hlTop, t.hlBottom);
-			Quad(8.0f, hy, 3.0f, 26.0f, t.accent[3]);
+			Quad(4.0f, hy - 1.0f, 304.0f, ROW_H, t.hlGlow);
+			QuadVGrad(6.0f, hy, 300.0f, ROW_H - 2.0f, t.hlTop, t.hlBottom);
+			Quad(6.0f, hy, 3.0f, ROW_H - 2.0f, t.accent[3]);
 		}
 
 		char value[48];
-		for (int row = 0; row < VISIBLE; ++row)
+		int firstRow = (int)floorf(scrollPos);
+		if (firstRow < 0) firstRow = 0;
+		for (int idx = firstRow; idx < kNumOptions && idx <= firstRow + VISIBLE; ++idx)
 		{
-			const int idx = scroll + row;
-			if (idx >= kNumOptions) break;
-			const float y = 36.0f + row * 28.0f;
+			const float y = LIST_Y + ((float)idx - scrollPos) * ROW_H;
+			if (y < LIST_Y - 4.0f || y > LIST_Y + (VISIBLE - 1) * ROW_H + 6.0f)
+				continue;
 			const bool sel = (idx == selection);
-			if (!sel)
-				Quad(12.0f, y + 25.0f, 296.0f, 1.0f, WithAlpha(t.rule, 140));
-			DrawText(sel ? 20.0f : 16.0f, y + 9.0f, kOptions[idx].label, sel ? t.text : t.textDim, 1.0f);
+			const bool pressed = (idx == pressedRow && !sel);
+			if (pressed)
+				Quad(6.0f, y, 300.0f, ROW_H - 2.0f, WithAlpha(t.hlTop, 110));
+			else if (!sel)
+				Quad(10.0f, y + ROW_H - 3.0f, 292.0f, 1.0f, WithAlpha(t.rule, 110));
+
+			DrawText(sel ? 16.0f : 14.0f, y + 9.0f, kOptions[idx].label, sel ? t.text : t.textDim, 1.0f);
 
 			value[0] = 0;
+			bool isOn = false;
+			bool isBool = false;
 			switch (idx)
 			{
-			case 0: snprintf(value, sizeof(value), prefs.DynarecEnabled ? "On" : "Off"); break;
-			case 1: snprintf(value, sizeof(value), prefs.DynarecLoopOptimisation ? "On" : "Off"); break;
-			case 2: snprintf(value, sizeof(value), prefs.DynarecDoublesOptimisation ? "On" : "Off"); break;
-			case 3: snprintf(value, sizeof(value), prefs.MemoryAccessOptimisation ? "On" : "Off"); break;
-			case 4: snprintf(value, sizeof(value), prefs.PatchesEnabled ? "On" : "Off"); break;
-			case 5: snprintf(value, sizeof(value), prefs.SpeedSyncEnabled ? "On" : "Off"); break;
-			case 6: snprintf(value, sizeof(value), prefs.DoubleDisplayEnabled ? "On" : "Off"); break;
-			case 7: snprintf(value, sizeof(value), prefs.CleanSceneEnabled ? "On" : "Off"); break;
-			case 8: snprintf(value, sizeof(value), prefs.ClearDepthFrameBuffer ? "On" : "Off"); break;
+			case 0: isBool = true; isOn = prefs.DynarecEnabled; break;
+			case 1: isBool = true; isOn = prefs.DynarecLoopOptimisation; break;
+			case 2: isBool = true; isOn = prefs.DynarecDoublesOptimisation; break;
+			case 3: isBool = true; isOn = prefs.MemoryAccessOptimisation; break;
+			case 4: isBool = true; isOn = prefs.PatchesEnabled; break;
+			case 5: isBool = true; isOn = prefs.SpeedSyncEnabled != 0; break;
+			case 6: isBool = true; isOn = prefs.DoubleDisplayEnabled; break;
+			case 7: isBool = true; isOn = prefs.CleanSceneEnabled; break;
+			case 8: isBool = true; isOn = prefs.ClearDepthFrameBuffer; break;
 			case 9: snprintf(value, sizeof(value), "%s", FrameskipName(prefs.Frameskip)); break;
 			case 10: snprintf(value, sizeof(value), "%s", TexHashName(prefs.CheckTextureHashFrequency)); break;
-			case 11: snprintf(value, sizeof(value), prefs.VideoRateMatch ? "On" : "Off"); break;
-			case 12: snprintf(value, sizeof(value), prefs.FogEnabled ? "On" : "Off"); break;
+			case 11: isBool = true; isOn = prefs.VideoRateMatch; break;
+			case 12: isBool = true; isOn = prefs.FogEnabled; break;
 			case 13: snprintf(value, sizeof(value), "%s", ViewportName(pending_viewport)); break;
 			case 14: snprintf(value, sizeof(value), "%.1fx", prefs.ZoomX); break;
 			case 15: snprintf(value, sizeof(value), "%s", AudioName(prefs.AudioEnabled)); break;
-			case 16: snprintf(value, sizeof(value), prefs.AudioRateMatch ? "On" : "Off"); break;
-			case 17: snprintf(value, sizeof(value), prefs.CheatsEnabled ? "On" : "Off"); break;
-			case 18: snprintf(value, sizeof(value), pending_fps ? "On" : "Off"); break;
+			case 16: isBool = true; isOn = prefs.AudioRateMatch; break;
+			case 17: isBool = true; isOn = prefs.CheatsEnabled; break;
+			case 18: isBool = true; isOn = pending_fps; break;
 			case 19: snprintf(value, sizeof(value), "%s", t.name); break;
 			case 20: snprintf(value, sizeof(value),
 				prefs.DynarecCycleMultiplier >= 3 ? "3x Turbo" :
 				(prefs.DynarecCycleMultiplier == 2 ? "2x Fast" : "1x Normal")); break;
 			}
-			if (value[0])
-				DrawRightText(306.0f, y + 9.0f, value, sel ? t.accent[1] : t.value, 0.875f);
+			if (isBool)
+			{
+				const char * lbl = isOn ? "ON" : "OFF";
+				DrawPill(254.0f, y + 4.0f, 46.0f, 18.0f, lbl,
+					isOn ? WithAlpha(t.accent[2], sel ? 95 : 55) : WithAlpha(t.bg, 190),
+					isOn ? t.accent[2] : t.rule,
+					isOn ? t.text : t.textDim, 0.75f);
+			}
+			else if (value[0])
+			{
+				const float pw = fmaxf(58.0f, TextWidth(value, 0.75f) + 14.0f);
+				DrawPill(300.0f - pw, y + 4.0f, pw, 18.0f, value,
+					WithAlpha(sel ? t.hlBottom : t.bg, 210),
+					sel ? t.accent[1] : t.rule,
+					sel ? t.accent[1] : t.value, 0.75f);
+			}
 		}
-		DrawButtonBar(kOptBar, 3);
+
+		// Touch scrollbar on right edge
+		{
+			const float trackH = VISIBLE * ROW_H - 4.0f;
+			Quad(312.0f, LIST_Y, 4.0f, trackH, WithAlpha(t.rule, 90));
+			const float thumbH = fmaxf(18.0f, trackH * (float)VISIBLE / (float)kNumOptions);
+			const float frac = MAX_SCROLL > 0.0f ? (scrollPos / MAX_SCROLL) : 0.0f;
+			Quad(312.0f, LIST_Y + (trackH - thumbH) * frac, 4.0f, thumbH,
+				touch.scrollbarDrag ? t.accent[1] : t.value);
+		}
+
+		DrawButtonBar(kOptBar, 4, pressedBar);
 
 		// ---- Top screen (PSX3D help panel)
 		BeginScreen(GFX_TOP, 400, 240);
@@ -1416,14 +1613,12 @@ void ReleaseAssets()
 	// Release preview texture and UI vertex pool before emulation so Old 3DS
 	// keeps all linear RAM and VRAM available for N64 textures.
 	ReleasePreview();
-	if (s_vtxPos) { linearFree(s_vtxPos); s_vtxPos = nullptr; }
-	if (s_vtxUv)  { linearFree(s_vtxUv);  s_vtxUv  = nullptr; }
-	if (s_vtxCol) { linearFree(s_vtxCol); s_vtxCol = nullptr; }
+	if (s_vtxPool) { linearFree(s_vtxPool); s_vtxPool = nullptr; }
 	s_frameBank = 0;
 	s_vtxOffset = 0;
 	s_batchStart = 0;
 	s_batchCount = 0;
-	s_batchTex = 0;
+	s_batchTex = nullptr;
 }
 
 bool IsMenuOpen()
@@ -1439,11 +1634,14 @@ std::string RunRomSelector()
 	ScanRoms(false);
 	RefreshMemorySummary();
 
-	const int ROWS_VISIBLE = 8;
-	const float ROW_H = 24.0f;
-	const float LIST_Y = 8.0f;
+	const int ROWS_VISIBLE = 7;
+	const float ROW_H = 26.0f;
+	const float LIST_Y = 28.0f;
 
 	Repeat rep = {};
+	TouchState touch;
+	touch.Reset();
+	bool manualScroll = false;
 	float clock_s = 0.0f;
 	float pop = 1.0f, popVel = 0.0f;
 	float titleT = 1.0f;
@@ -1460,34 +1658,98 @@ std::string RunRomSelector()
 	};
 
 	if (s_viewCount > 0)
-		UpdatePreviewForRom(s_viewOrder[s_selected]);
+		RequestPreviewForRom(s_viewOrder[s_selected], true);
 
 	while (aptMainLoop() && !shouldQuit)
 	{
-		gspWaitForVBlank();
+		// C3D_FrameEnd syncs to VBlank; avoid double gspWaitForVBlank() stall.
 		hidScanInput();
 		u32 down = hidKeysDown();
 		const u32 held = hidKeysHeld();
 		clock_s += 1.0f / 60.0f;
+		touch.Update(down, held);
 
-		if (down & KEY_TOUCH)
+		const float maxScroll = (s_viewCount > ROWS_VISIBLE) ? (float)(s_viewCount - ROWS_VISIBLE) : 0.0f;
+		int pressedBar = -1;
+		int pressedRow = -1;
+		bool pressedSortPill = false;
+		bool pressedThemePill = false;
+
+		if (touch.active)
 		{
-			touchPosition tp;
-			hidTouchRead(&tp);
-			const int barHit = HitButtonBar(tp, 5);
-			if (barHit == 0) down |= KEY_START;
-			else if (barHit == 1) down |= KEY_SELECT;
-			else if (barHit == 2) down |= KEY_X;
-			else if (barHit == 3) down |= KEY_Y;
-			else if (barHit == 4) down |= KEY_A;
-			else if (s_viewCount > 0 && tp.py >= (int)LIST_Y && tp.py < (int)(LIST_Y + ROWS_VISIBLE * ROW_H))
+			if (!touch.dragged)
 			{
-				const int row = (tp.py - (int)LIST_Y) / (int)ROW_H;
-				const int idx = (int)floorf(s_scrollPos + 0.5f) + row;
-				if (idx >= 0 && idx < s_viewCount)
+				pressedBar = HitButtonBar(touch.curX, touch.curY, 5);
+				if (touch.curY >= 2 && touch.curY < 24)
 				{
-					if (idx == s_selected) down |= KEY_A;
-					s_selected = idx;
+					if (touch.curX >= 166 && touch.curX < 244) pressedSortPill = true;
+					else if (touch.curX >= 248 && touch.curX < 316) pressedThemePill = true;
+				}
+			}
+
+			if (s_viewCount > ROWS_VISIBLE && touch.justPressed &&
+				touch.curX >= 294 && touch.curY >= (int)LIST_Y && touch.curY < 210)
+			{
+				touch.scrollbarDrag = true;
+			}
+
+			if (touch.scrollbarDrag && maxScroll > 0.0f)
+			{
+				float frac = ((float)touch.curY - LIST_Y) / (ROWS_VISIBLE * ROW_H);
+				if (frac < 0.0f) frac = 0.0f;
+				if (frac > 1.0f) frac = 1.0f;
+				s_scrollPos = frac * maxScroll;
+				s_scrollVel = 0.0f;
+				manualScroll = true;
+			}
+			else if (touch.dragged && s_viewCount > ROWS_VISIBLE &&
+				touch.startY >= (int)LIST_Y && touch.startY < 210)
+			{
+				s_scrollPos -= touch.deltaY / ROW_H;
+				if (s_scrollPos < 0.0f) s_scrollPos = 0.0f;
+				if (s_scrollPos > maxScroll) s_scrollPos = maxScroll;
+				s_scrollVel = 0.0f;
+				manualScroll = true;
+			}
+			else if (!touch.dragged && s_viewCount > 0 &&
+				touch.curY >= (int)LIST_Y && touch.curY < (int)(LIST_Y + ROWS_VISIBLE * ROW_H))
+			{
+				const int rIdx = (int)floorf(s_scrollPos + ((float)touch.curY - LIST_Y) / ROW_H);
+				if (rIdx >= 0 && rIdx < s_viewCount)
+					pressedRow = rIdx;
+			}
+		}
+
+		if (touch.justReleased)
+		{
+			if (touch.dragged && !touch.scrollbarDrag && s_viewCount > ROWS_VISIBLE &&
+				touch.startY >= (int)LIST_Y && touch.startY < 210)
+			{
+				s_scrollVel = -(touch.velY / ROW_H) * 60.0f * 0.45f;
+				manualScroll = true;
+			}
+			else if (!touch.dragged && !touch.scrollbarDrag)
+			{
+				const int barHit = HitButtonBar(touch.releaseX, touch.releaseY, 5);
+				if (barHit == 0) down |= KEY_START;
+				else if (barHit == 1) down |= KEY_SELECT;
+				else if (barHit == 2) down |= KEY_X;
+				else if (barHit == 3) down |= KEY_Y;
+				else if (barHit == 4) down |= KEY_A;
+				else if (touch.releaseY >= 2 && touch.releaseY < 24)
+				{
+					if (touch.releaseX >= 166 && touch.releaseX < 244) down |= KEY_SELECT;
+					else if (touch.releaseX >= 248 && touch.releaseX < 316) down |= KEY_R;
+				}
+				else if (s_viewCount > 0 && touch.releaseY >= (int)LIST_Y && touch.releaseY < (int)(LIST_Y + ROWS_VISIBLE * ROW_H))
+				{
+					const int idx = (int)floorf(s_scrollPos + ((float)touch.releaseY - LIST_Y) / ROW_H);
+					if (idx >= 0 && idx < s_viewCount)
+					{
+						if (idx == s_selected) down |= KEY_A;
+						s_selected = idx;
+						manualScroll = false;
+					}
 				}
 			}
 		}
@@ -1503,6 +1765,7 @@ std::string RunRomSelector()
 			s_sortMode = (s_sortMode + 1) % SORT_COUNT;
 			RebuildView();
 			SaveFrontendConfig();
+			manualScroll = false;
 			snprintf(toast, sizeof(toast), "View: %s", kSortNames[s_sortMode]);
 			toastFrames = 80;
 		}
@@ -1525,18 +1788,26 @@ std::string RunRomSelector()
 		if (s_viewCount > 0)
 		{
 			if (Pressed(rep, down, held, KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN, 0))
+			{
 				s_selected = (s_selected + 1) % s_viewCount;
+				manualScroll = false;
+			}
 			if (Pressed(rep, down, held, KEY_UP | KEY_DUP | KEY_CPAD_UP, 1))
+			{
 				s_selected = (s_selected + s_viewCount - 1) % s_viewCount;
+				manualScroll = false;
+			}
 			if (Pressed(rep, down, held, KEY_RIGHT | KEY_DRIGHT, 2))
 			{
 				s_selected += ROWS_VISIBLE;
 				if (s_selected >= s_viewCount) s_selected = s_viewCount - 1;
+				manualScroll = false;
 			}
 			if (Pressed(rep, down, held, KEY_LEFT | KEY_DLEFT, 3))
 			{
 				s_selected -= ROWS_VISIBLE;
 				if (s_selected < 0) s_selected = 0;
+				manualScroll = false;
 			}
 
 			if (down & KEY_Y)
@@ -1557,21 +1828,17 @@ std::string RunRomSelector()
 				{
 					RunOptionsPage(cur.romId, false);
 					RefreshMemorySummary();
+					touch.Reset();
 				}
 			}
 
 			if (s_viewCount > 0)
-				UpdatePreviewForRom(s_viewOrder[s_selected]);
+				RequestPreviewForRom(s_viewOrder[s_selected], false);
 		}
 
-		const bool launch = (down & KEY_A) && s_viewCount > 0;
+		TickPreviewLoader();
 
-		// Smooth scroll and highlight springs (PSX3D flist feel)
-		int targetTop = (int)floorf(s_scrollPos + 0.5f);
-		if (s_selected < targetTop + 1) targetTop = s_selected - 1;
-		if (s_selected > targetTop + ROWS_VISIBLE - 2) targetTop = s_selected - ROWS_VISIBLE + 2;
-		if (targetTop > s_viewCount - ROWS_VISIBLE) targetTop = s_viewCount - ROWS_VISIBLE;
-		if (targetTop < 0) targetTop = 0;
+		const bool launch = (down & KEY_A) && s_viewCount > 0;
 
 		if (s_selected != prevSel)
 		{
@@ -1588,33 +1855,72 @@ std::string RunRomSelector()
 		}
 
 		SpringStep(s_hlPos, s_hlVel, (float)s_selected, 260.0f, 24.0f);
-		SpringStep(s_scrollPos, s_scrollVel, (float)targetTop, 200.0f, 24.0f);
+
+		if (manualScroll)
+		{
+			if (!touch.active)
+			{
+				s_scrollPos += s_scrollVel * (1.0f / 60.0f);
+				s_scrollVel *= 0.86f;
+				if (fabsf(s_scrollVel) < 0.05f) s_scrollVel = 0.0f;
+			}
+			if (s_scrollPos < 0.0f) { s_scrollPos = 0.0f; s_scrollVel = 0.0f; }
+			if (s_scrollPos > maxScroll) { s_scrollPos = maxScroll; s_scrollVel = 0.0f; }
+		}
+		else
+		{
+			int targetTop = (int)floorf(s_scrollPos + 0.5f);
+			if (s_selected < targetTop + 1) targetTop = s_selected - 1;
+			if (s_selected > targetTop + ROWS_VISIBLE - 2) targetTop = s_selected - ROWS_VISIBLE + 2;
+			if (targetTop > s_viewCount - ROWS_VISIBLE) targetTop = s_viewCount - ROWS_VISIBLE;
+			if (targetTop < 0) targetTop = 0;
+			SpringStep(s_scrollPos, s_scrollVel, (float)targetTop, 200.0f, 24.0f);
+			if (s_scrollPos < 0.0f) s_scrollPos = 0.0f;
+			if (s_scrollPos > maxScroll) s_scrollPos = maxScroll;
+		}
 
 		const Theme & t = ActiveTheme();
 		BeginFrame();
 
-		// ---- Bottom screen: quiet PSX3D 8-row touch list + bottom bar
+		// ---- Bottom screen: touch-friendly toolbar + 7-row scrollable ROM list + action bar
 		BeginScreen(GFX_BOTTOM, 320, 240);
+
+		// Top compact touch toolbar
+		Quad(0, 0, 320.0f, 26.0f, t.panel);
+		Quad(0, 25.0f, 320.0f, 1.0f, t.rule);
+		char libLabel[32];
+		snprintf(libLabel, sizeof(libLabel), "ROMS (%d)", s_viewCount);
+		DrawTextShadow(8.0f, 9.0f, libLabel, t.text, WithAlpha(t.bg, 220), 0.875f);
+
+		char sortPillLabel[24];
+		snprintf(sortPillLabel, sizeof(sortPillLabel), "Sort:%s", kSortNames[s_sortMode]);
+		DrawPill(166.0f, 4.0f, 78.0f, 18.0f, sortPillLabel,
+			pressedSortPill ? t.hlTop : WithAlpha(t.bg, 210),
+			pressedSortPill ? t.accent[1] : t.rule,
+			pressedSortPill ? t.text : t.value, 0.75f);
+		DrawPill(248.0f, 4.0f, 66.0f, 18.0f, "Theme",
+			pressedThemePill ? t.hlTop : WithAlpha(t.bg, 210),
+			pressedThemePill ? t.accent[1] : t.rule,
+			pressedThemePill ? t.text : t.textDim, 0.75f);
 
 		if (s_viewCount == 0)
 		{
-			DrawHeader(320.0f, "Library", "0 ROMs");
 			QuadVGrad(24.0f, 64.0f, 272.0f, 108.0f, t.cardTop, t.cardBottom);
 			Quad(24.0f, 64.0f, 3.0f, 108.0f, t.accent[0]);
 			DrawCenteredText(160.0f, 84.0f, "No N64 ROMs found", t.text, 1.125f);
 			DrawCenteredText(160.0f, 110.0f, "Copy .z64/.n64/.v64 files to:", t.textDim, 0.875f);
 			DrawCenteredText(160.0f, 128.0f, "sdmc:/3ds/DaedalusX64/Roms", t.value, 0.875f);
-			DrawCenteredText(160.0f, 150.0f, "L/R: Theme", t.textDim, 0.75f);
+			DrawCenteredText(160.0f, 150.0f, "Tap Theme or L/R to switch theme", t.textDim, 0.75f);
 		}
 		else
 		{
-			// Signature PSX3D spring-animated selection highlight
+			// Spring-animated selection highlight
 			const float hy = LIST_Y + (s_hlPos - s_scrollPos) * ROW_H;
 			if (hy > LIST_Y - ROW_H && hy < LIST_Y + ROWS_VISIBLE * ROW_H)
 			{
-				Quad(4.0f, hy - 1.0f, 306.0f, ROW_H + 2.0f, t.hlGlow);
-				QuadVGrad(6.0f, hy, 302.0f, ROW_H, t.hlTop, t.hlBottom);
-				Quad(6.0f, hy, 3.0f, ROW_H, t.accent[s_selected & 3]);
+				Quad(4.0f, hy - 1.0f, 304.0f, ROW_H + 1.0f, t.hlGlow);
+				QuadVGrad(6.0f, hy, 300.0f, ROW_H - 1.0f, t.hlTop, t.hlBottom);
+				Quad(6.0f, hy, 3.0f, ROW_H - 1.0f, t.accent[s_selected & 3]);
 			}
 
 			int first = (int)floorf(s_scrollPos);
@@ -1622,31 +1928,38 @@ std::string RunRomSelector()
 			for (int i = first; i < s_viewCount && i <= first + ROWS_VISIBLE; ++i)
 			{
 				const float ry = LIST_Y + (i - s_scrollPos) * ROW_H;
-				if (ry < LIST_Y - 4.0f || ry > LIST_Y + (ROWS_VISIBLE - 1) * ROW_H + 4.0f)
+				if (ry < LIST_Y - 4.0f || ry > LIST_Y + (ROWS_VISIBLE - 1) * ROW_H + 6.0f)
 					continue;
 				const bool sel = (i == s_selected);
+				const bool pressed = (i == pressedRow && !sel);
 				const FrontendRomInfo & r = s_roms[s_viewOrder[i]];
 
+				if (pressed)
+					Quad(6.0f, ry, 300.0f, ROW_H - 1.0f, WithAlpha(t.hlTop, 110));
+				else if (!sel)
+					Quad(10.0f, ry + ROW_H - 2.0f, 292.0f, 1.0f, WithAlpha(t.rule, 90));
+
 				const float textX = sel ? 18.0f : 14.0f;
-				DrawTextEllipsis(textX, ry + 8.0f,
-					r.favorite ? 236.0f : 250.0f, r.title, sel ? t.text : t.textDim, 1.0f);
+				DrawTextEllipsis(textX, ry + 9.0f,
+					r.favorite ? 232.0f : 246.0f, r.title, sel ? t.text : t.textDim, 1.0f);
 
 				if (r.favorite)
-					DrawRightText(278.0f, ry + 8.0f, "*", t.accent[1], 1.0f);
-				DrawRightText(304.0f, ry + 9.0f, r.country, sel ? t.accent[1] : t.textDim, 0.75f);
+					DrawRightText(272.0f, ry + 9.0f, "*", t.accent[1], 1.0f);
+				DrawRightText(302.0f, ry + 10.0f, r.country, sel ? t.accent[1] : t.textDim, 0.75f);
 			}
 
-			// Thin PSX3D scroll indicator at x = 314
+			// Interactive touch scrollbar at x = 311
 			if (s_viewCount > ROWS_VISIBLE)
 			{
-				const float trackH = ROWS_VISIBLE * ROW_H;
+				const float trackH = ROWS_VISIBLE * ROW_H - 4.0f;
+				Quad(311.0f, LIST_Y + 2.0f, 4.0f, trackH, WithAlpha(t.rule, 85));
 				float thumbH = trackH * (float)ROWS_VISIBLE / (float)s_viewCount;
-				if (thumbH < 14.0f) thumbH = 14.0f;
-				const float maxScroll = (float)(s_viewCount - ROWS_VISIBLE);
+				if (thumbH < 18.0f) thumbH = 18.0f;
 				float frac = maxScroll > 0.0f ? (s_scrollPos / maxScroll) : 0.0f;
 				if (frac < 0.0f) frac = 0.0f;
 				if (frac > 1.0f) frac = 1.0f;
-				Quad(314.0f, LIST_Y + (trackH - thumbH) * frac, 3.0f, thumbH, t.rule);
+				Quad(311.0f, LIST_Y + 2.0f + (trackH - thumbH) * frac, 4.0f, thumbH,
+					touch.scrollbarDrag ? t.accent[1] : t.value);
 			}
 		}
 
@@ -1658,7 +1971,7 @@ std::string RunRomSelector()
 			--toastFrames;
 		}
 
-		DrawButtonBar(kLibBar, 5);
+		DrawButtonBar(kLibBar, 5, pressedBar);
 
 		// ---- Top screen: authentic PSX3D synthwave backdrop + 3D-feel cover carousel
 		BeginScreen(GFX_TOP, 400, 240);
@@ -1724,7 +2037,7 @@ std::string RunRomSelector()
 						const float sc = fminf((size - 4.0f) / pw, (size - 4.0f) / ph);
 						const float dw = pw * sc;
 						const float dh = ph * sc;
-						DrawTexturedQuad(s_previewTex->GetTextureId(),
+						DrawTexturedQuad(s_previewTex->GetC3DTexture(),
 							cx - dw * 0.5f, cy - dh * 0.5f, dw, dh, 0.0f, 0.0f, u1, v1);
 					}
 					else
@@ -1831,6 +2144,9 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 		{ "A", "Select", true  }
 	};
 
+	TouchState touch;
+	touch.Reset();
+
 	// SELECT opened the pause menu; wait for physical release first
 	while (aptMainLoop() && (hidKeysHeld() & KEY_SELECT))
 	{
@@ -1841,40 +2157,55 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 	bool exitMenu = false;
 	while (aptMainLoop() && !shouldQuit && !exitMenu)
 	{
-		gspWaitForVBlank();
+		// C3D_FrameEnd syncs to VBlank; avoid double gspWaitForVBlank() stall.
 		hidScanInput();
 		u32 down = hidKeysDown();
 		const u32 held = hidKeysHeld();
 		clock_s += 1.0f / 60.0f;
+		touch.Update(down, held);
 
-		if (down & KEY_TOUCH)
+		int pressedBar = -1;
+		int pressedItem = -1;
+		if (touch.active && !touch.dragged)
 		{
-			touchPosition tp;
-			hidTouchRead(&tp);
-			const int barHit = HitButtonBar(tp, 2);
+			pressedBar = HitButtonBar(touch.curX, touch.curY, 2);
+			if (pressedBar < 0)
+			{
+				if (page == PAGE_MAIN && touch.curY >= 38 && touch.curY < 38 + kMainCount * 28)
+					pressedItem = (touch.curY - 38) / 28;
+				else if (page == PAGE_SLOTS && touch.curY >= 42 && touch.curY < 42 + 5 * 32)
+					pressedItem = (touch.curY - 42) / 32;
+				else if (page == PAGE_CLOSE && touch.curY >= 72 && touch.curY < 72 + 2 * 38)
+					pressedItem = (touch.curY - 72) / 38;
+			}
+		}
+
+		if (touch.justReleased && !touch.dragged)
+		{
+			const int barHit = HitButtonBar(touch.releaseX, touch.releaseY, 2);
 			if (barHit == 0) down |= KEY_B;
 			else if (barHit == 1) down |= KEY_A;
-			else if (page == PAGE_MAIN)
+			else if (page == PAGE_MAIN && touch.releaseY >= 38 && touch.releaseY < 38 + kMainCount * 28)
 			{
-				const int row = (tp.py - 40) / 26;
+				const int row = (touch.releaseY - 38) / 28;
 				if (row >= 0 && row < kMainCount)
 				{
-					if (row == selection) down |= KEY_A;
 					selection = row;
+					down |= KEY_A; // clean single-tap activation on pause menu items
 				}
 			}
-			else if (page == PAGE_SLOTS)
+			else if (page == PAGE_SLOTS && touch.releaseY >= 42 && touch.releaseY < 42 + 5 * 32)
 			{
-				const int row = (tp.py - 44) / 30;
+				const int row = (touch.releaseY - 42) / 32;
 				if (row >= 0 && row < 5)
 				{
-					if (row == slot) down |= KEY_A;
 					slot = row;
+					down |= KEY_A;
 				}
 			}
-			else if (page == PAGE_CLOSE)
+			else if (page == PAGE_CLOSE && touch.releaseY >= 72 && touch.releaseY < 72 + 2 * 38)
 			{
-				const int row = (tp.py - 68) / 32;
+				const int row = (touch.releaseY - 72) / 38;
 				if (row >= 0 && row < 2)
 				{
 					close_sel = row;
@@ -1898,7 +2229,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 				case 1:
 				case 2:
 					RefreshSlots();
-	RefreshMemorySummary();
+					RefreshMemorySummary();
 					page = PAGE_SLOTS;
 					slot = 0;
 					hl = 0.0f;
@@ -1906,6 +2237,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 				case 3:
 					RunOptionsPage(romId, true);
 					RefreshMemorySummary();
+					touch.Reset();
 					break;
 				case 4:
 					s_themeIdx = (s_themeIdx + 1) % kThemeCount;
@@ -1969,52 +2301,71 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 		if (page == PAGE_MAIN)
 		{
 			DrawHeader(320.0f, "Paused", gameName ? gameName : "N64");
-			const float hy = 40.0f + hl * 26.0f;
-			Quad(10.0f, hy - 1.0f, 300.0f, 26.0f, t.hlGlow);
-			QuadVGrad(12.0f, hy, 296.0f, 24.0f, t.hlTop, t.hlBottom);
-			Quad(12.0f, hy, 3.0f, 24.0f, t.accent[selection & 3]);
+			const float hy = 38.0f + hl * 28.0f;
+			Quad(8.0f, hy - 1.0f, 304.0f, 27.0f, t.hlGlow);
+			QuadVGrad(10.0f, hy, 300.0f, 25.0f, t.hlTop, t.hlBottom);
+			Quad(10.0f, hy, 3.0f, 25.0f, t.accent[selection & 3]);
 
 			for (int i = 0; i < kMainCount; ++i)
 			{
-				const float y = 40.0f + i * 26.0f;
+				const float y = 38.0f + i * 28.0f;
 				const bool sel = (i == selection);
-				if (sel)
-					DrawTextShadow(24.0f, y + 8.0f, main_items[i], t.text, WithAlpha(t.bg, 220), 1.0f);
+				const bool pressed = (i == pressedItem && !sel);
+				if (pressed)
+					Quad(10.0f, y, 300.0f, 25.0f, WithAlpha(t.hlTop, 115));
+				else if (!sel)
+					Quad(14.0f, y + 25.0f, 292.0f, 1.0f, WithAlpha(t.rule, 100));
+
+				if (sel || pressed)
+					DrawTextShadow(22.0f, y + 9.0f, main_items[i], t.text, WithAlpha(t.bg, 220), 1.0f);
 				else
-					DrawText(20.0f, y + 8.0f, main_items[i], t.textDim, 1.0f);
+					DrawText(18.0f, y + 9.0f, main_items[i], t.textDim, 1.0f);
 				if (i == 4)
-					DrawRightText(300.0f, y + 9.0f, t.name, sel ? t.accent[1] : t.value, 0.75f);
+					DrawRightText(300.0f, y + 10.0f, t.name, sel ? t.accent[1] : t.value, 0.75f);
 			}
 		}
 		else if (page == PAGE_SLOTS)
 		{
 			DrawHeader(320.0f, selection == 1 ? "Save State" : "Load State", gameName ? gameName : "N64");
-			const float hy = 44.0f + hl * 30.0f;
-			Quad(10.0f, hy - 1.0f, 300.0f, 28.0f, t.hlGlow);
-			QuadVGrad(12.0f, hy, 296.0f, 26.0f, t.hlTop, t.hlBottom);
-			Quad(12.0f, hy, 3.0f, 26.0f, t.accent[2]);
+			const float hy = 42.0f + hl * 32.0f;
+			Quad(8.0f, hy - 1.0f, 304.0f, 30.0f, t.hlGlow);
+			QuadVGrad(10.0f, hy, 300.0f, 28.0f, t.hlTop, t.hlBottom);
+			Quad(10.0f, hy, 3.0f, 28.0f, t.accent[2]);
 
 			for (int i = 0; i < 5; ++i)
 			{
-				const float y = 44.0f + i * 30.0f;
+				const float y = 42.0f + i * 32.0f;
 				const bool sel = (i == slot);
+				const bool pressed = (i == pressedItem && !sel);
+				if (pressed)
+					Quad(10.0f, y, 300.0f, 28.0f, WithAlpha(t.hlTop, 115));
+				else if (!sel)
+					Quad(14.0f, y + 28.0f, 292.0f, 1.0f, WithAlpha(t.rule, 100));
+
 				char label[24];
 				snprintf(label, sizeof(label), "Slot %d", i + 1);
-				DrawText(sel ? 24.0f : 20.0f, y + 9.0f, label, sel ? t.text : t.textDim, 1.0f);
-				DrawRightText(300.0f, y + 10.0f, slotExists[i] ? "Saved" : "Empty",
-					slotExists[i] ? t.accent[2] : t.textDim, 0.75f);
+				DrawText(sel ? 22.0f : 18.0f, y + 10.0f, label, (sel || pressed) ? t.text : t.textDim, 1.0f);
+				DrawPill(242.0f, y + 5.0f, 58.0f, 18.0f,
+					slotExists[i] ? "SAVED" : "EMPTY",
+					slotExists[i] ? WithAlpha(t.accent[2], 70) : WithAlpha(t.bg, 180),
+					slotExists[i] ? t.accent[2] : t.rule,
+					slotExists[i] ? t.text : t.textDim, 0.75f);
 			}
 		}
 		else
 		{
 			DrawHeader(320.0f, "Close ROM", "Confirm");
-			const float hy = 68.0f + hl * 32.0f;
-			QuadVGrad(16.0f, hy, 288.0f, 28.0f, t.hlTop, t.hlBottom);
-			Quad(16.0f, hy, 3.0f, 28.0f, t.accent[0]);
-			DrawText(28.0f, 78.0f, "Close and return to library", close_sel == 0 ? t.text : t.textDim, 1.0f);
-			DrawText(28.0f, 110.0f, "Back to game", close_sel == 1 ? t.text : t.textDim, 1.0f);
+			DrawCenteredText(160.0f, 48.0f, "Unsaved progress will be lost.", t.textDim, 0.875f);
+			const float hy = 72.0f + hl * 38.0f;
+			Quad(14.0f, hy - 1.0f, 292.0f, 34.0f, t.hlGlow);
+			QuadVGrad(16.0f, hy, 288.0f, 32.0f, t.hlTop, t.hlBottom);
+			Quad(16.0f, hy, 3.0f, 32.0f, close_sel == 0 ? t.accent[0] : t.accent[2]);
+			DrawText(28.0f, 84.0f, "Close and return to library",
+				(close_sel == 0 || pressedItem == 0) ? t.text : t.textDim, 1.0f);
+			DrawText(28.0f, 122.0f, "Back to game",
+				(close_sel == 1 || pressedItem == 1) ? t.text : t.textDim, 1.0f);
 		}
-		DrawButtonBar(kPauseBar, 2);
+		DrawButtonBar(kPauseBar, 2, pressedBar);
 
 		// ---- Top screen
 		BeginScreen(GFX_TOP, 400, 240);

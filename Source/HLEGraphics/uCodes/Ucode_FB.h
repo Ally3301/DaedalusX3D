@@ -80,7 +80,11 @@ static inline void DrawFrameBuffer(u32 origin, const CNativeTexture * texture)
 			src_offset += 2;
 		}
 	}
+#ifdef DAEDALUS_CTR
+	const_cast<CNativeTexture*>(texture)->SetDataRaw5551(pixels, FB_WIDTH, FB_HEIGHT);
+#else
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, FB_WIDTH, FB_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, pixels);
+#endif
 
 	//ToDO: Implement me PSP
 	//Doesn't work

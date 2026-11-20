@@ -103,7 +103,12 @@ static const unsigned int kSvcAccessControlEnabled[4] =
 //-----------------------------------------------------------------------------
 static Result ctrEnableAllServices(void)
 {
-	__asm__ volatile("cpsid aif");
+	unsigned int cpsr = 0;
+	__asm__ volatile(
+		"mrs %0, cpsr\n\t"
+		"cpsid aif"
+		: "=r"(cpsr)
+	);
 
 	unsigned int *svc_access_control = *(*(unsigned int***)0xFFFF9000 + 0x22) - 0x6;
 
@@ -117,6 +122,7 @@ static Result ctrEnableAllServices(void)
 	svc_access_control[2] = kSvcAccessControlEnabled[2];
 	svc_access_control[3] = kSvcAccessControlEnabled[3];
 
+	__asm__ volatile("msr cpsr_c, %0" : : "r"(cpsr));
 	return 0;
 }
 
@@ -215,22 +221,60 @@ int _DetectSvcAccess(void)
 	return R_SUCCEEDED(svcGetSystemInfo(&out, 0x10000, 0)) ? 1 : 0;
 }
 
+static int gUseEmulatorICacheSvc = 0;
+
+static void ctrInvalidateICacheRangeSvc93(const void *start, unsigned int len)
+{
+	register u32 r0 __asm__("r0") = (u32)(uintptr_t)start;
+	register u32 r1 __asm__("r1") = (u32)len;
+	__asm__ volatile("svc 0x93" : "+r"(r0) : "r"(r1) : "r2", "r3", "r12", "memory");
+}
+
+extern void _InvalidateAndFlushCachesAsm(void);
+extern void _InvalidateAndFlushCacheRangeAsm(const void *start, unsigned int size);
+
+void _InvalidateAndFlushCaches(void)
+{
+	if (gUseEmulatorICacheSvc)
+	{
+		ctrInvalidateICacheRangeSvc93((const void *)__ctru_heap, __ctru_heap_size);
+		return;
+	}
+	_InvalidateAndFlushCachesAsm();
+}
+
+void _InvalidateAndFlushCacheRange(const void *start, unsigned int size)
+{
+	if (size == 0 || start == NULL)
+		return;
+	if (gUseEmulatorICacheSvc)
+	{
+		u32 a = (u32)(uintptr_t)start & ~31u;
+		u32 len = (((u32)(uintptr_t)start + size) - a + 31u) & ~31u;
+		svcFlushProcessDataCache(CUR_PROCESS_HANDLE, a, len);
+		ctrInvalidateICacheRangeSvc93((const void *)(uintptr_t)a, len);
+		return;
+	}
+	_InvalidateAndFlushCacheRangeAsm(start, size);
+}
+
 //-----------------------------------------------------------------------------
 // Reports whether we are running under a PC emulator. SystemInfo type 0x20000
 // is answered by Citra (1) and Azahar (2); real consoles return an error.
-// Those emulators do not implement the kernel calls the cache flush needs, so
-// freshly written code goes stale and the dynarec crashes there.
 //-----------------------------------------------------------------------------
 int _RunningInEmulator(void)
 {
 	s64 out = 0;
-	return (R_SUCCEEDED(svcGetSystemInfo(&out, 0x20000, 0)) && out > 0) ? 1 : 0;
+	int is_emu = (R_SUCCEEDED(svcGetSystemInfo(&out, 0x20000, 0)) && out > 0) ? 1 : 0;
+	if (is_emu)
+		gUseEmulatorICacheSvc = 1;
+	return is_emu;
 }
 
 //-----------------------------------------------------------------------------
-// Allocates a single page and tries to make it executable, then releases it.
-// Returns 0 when the dynarec can own executable memory, a negative errno-like
-// value when allocation failed, or the failing Result otherwise.
+// Allocates a single page, makes it executable, and runs a 2-pass self-modifying
+// code test (mov r0, #42 -> rewrite mov r0, #43) to verify both RWX permission
+// and instruction cache coherency on real 3DS hardware and Azahar/Citra.
 //-----------------------------------------------------------------------------
 int _ProbeExecutableMemory(void)
 {
@@ -239,6 +283,27 @@ int _ProbeExecutableMemory(void)
 		return -1;
 
 	int result = _SetMemoryPermission(page, 0x1000, 7);
+	if (result >= 0)
+	{
+		_RunningInEmulator();
+		volatile u32 *code = (volatile u32 *)page;
+		int (*probe)(void) = (int (*)(void))page;
+		code[0] = 0xE3A0002Au; // mov r0, #42
+		code[1] = 0xE12FFF1Eu; // bx lr
+		_InvalidateAndFlushCacheRange(page, 8);
+		if (probe() != 42)
+		{
+			result = -2;
+		}
+		else
+		{
+			code[0] = 0xE3A0002Bu; // mov r0, #43
+			_InvalidateAndFlushCacheRange(page, 8);
+			if (probe() != 43)
+				result = -3;
+		}
+		_SetMemoryPermission(page, 0x1000, 3);
+	}
 	free(page);
 
 	return result;

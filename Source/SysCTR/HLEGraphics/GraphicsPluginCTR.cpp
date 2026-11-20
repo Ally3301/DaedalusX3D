@@ -37,6 +37,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "Utility/Timing.h"
 
 #include "Core/Memory.h"
+#include "Core/ROM.h"
+#include "SysCTR/Utility/PerfProfilerCTR.h"
 
 //#define DAEDALUS_FRAMERATE_ANALYSIS
 
@@ -221,6 +223,7 @@ void CGraphicsPluginImpl::UpdateScreen()
 		{
 			CGraphicsContext::Get()->UpdateFrame( false );
 		}
+		PerfCTR::OnScreenFrame(gFrameskipActive, g_ROM.settings.GameName.c_str());
 
 		CurrentFrame++;
 	
@@ -264,6 +267,7 @@ void CGraphicsPluginImpl::RomClosed()
 	gFrameskipActive = false;
 	OldFrameskipActive = false;
 	OlderFrameskipActive = false;
+	PerfCTR::Reset();
 
 	#ifdef DAEDALUS_DEBUG_CONSOLE
 	DBGConsole_Msg(0, "Finalising Graphics");

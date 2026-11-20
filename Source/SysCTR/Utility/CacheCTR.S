@@ -8,8 +8,8 @@ _cache_flush_end:
 	.word 0
 
 .text
-.global _InvalidateAndFlushCaches
-.global _InvalidateAndFlushCacheRange
+.global _InvalidateAndFlushCachesAsm
+.global _InvalidateAndFlushCacheRangeAsm
 
 _ClearCacheKernel:
 	cpsid aif
@@ -45,17 +45,17 @@ _ClearCacheRangeKernel:
 	mcr p15, 0, r2, c7, c5, 4	@ Flush Prefetch Buffer
 	bx lr
 
-_InvalidateAndFlushCaches:
+_InvalidateAndFlushCachesAsm:
 	ldr r0, =_ClearCacheKernel
 	svc 0x80					@ svcCustomBackdoor
 	bx lr
 
-@ void _InvalidateAndFlushCacheRange(const void *start, unsigned int size)
-_InvalidateAndFlushCacheRange:
+@ void _InvalidateAndFlushCacheRangeAsm(const void *start, unsigned int size)
+_InvalidateAndFlushCacheRangeAsm:
 	cmp r1, #0
 	bxeq lr
 	cmp r1, #16384				@ >= L1 cache size: full flush is faster
-	bhs _InvalidateAndFlushCaches
+	bhs _InvalidateAndFlushCachesAsm
 	add r1, r0, r1
 	ldr r2, =_cache_flush_start
 	str r0, [r2]

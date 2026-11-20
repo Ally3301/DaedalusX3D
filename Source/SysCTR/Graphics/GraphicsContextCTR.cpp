@@ -1,8 +1,10 @@
 #include "stdafx.h"
 #include "Graphics/GraphicsContext.h"
+#include "SysCTR/Graphics/Citro3DContext.h"
+#include "SysCTR/Utility/PerfProfilerCTR.h"
 
 #include <3ds.h>
-#include <GL/picaGL.h>
+#include <citro3d.h>
 
 #include "Config/ConfigOptions.h"
 #include "Core/ROM.h"
@@ -28,9 +30,17 @@ static bool newFrame = true;
 
 uint32_t     gVertexCount = 0;
 
-// Interleaved DaedalusVtx linear buffer allows single-memcpy submission in RendererCTR.
+// Interleaved DaedalusVtx linear buffer allows zero-repack single-memcpy submission.
 DaedalusVtx * gVtxBuffer = nullptr;
 DaedalusVtx * gVtxBufferPtr = nullptr;
+
+static inline u32 ColourToClearRGBA8(const c32 & colour)
+{
+	return ((u32)colour.GetR() << 24) |
+	       ((u32)colour.GetG() << 16) |
+	       ((u32)colour.GetB() << 8)  |
+	       ((u32)colour.GetA());
+}
 
 class IGraphicsContext : public CGraphicsContext
 {
@@ -78,9 +88,6 @@ private:
 	DaedalusVtx *		mVtxBanks[kNumVertexBanks];
 };
 
-//*************************************************************************************
-//
-//*************************************************************************************
 template<> bool CSingleton< CGraphicsContext >::Create()
 {
 #ifdef DAEDALUS_ENABLE_ASSERTS
@@ -99,11 +106,7 @@ template<> bool CSingleton< CGraphicsContext >::Create()
 	return true;
 }
 
-//////////////////////////////////////////////////////////////////////
-// Construction/Destruction
-//////////////////////////////////////////////////////////////////////
-
-uint32_t gMaxVertices = 20000;
+uint32_t gMaxVertices = 24576;
 
 IGraphicsContext::IGraphicsContext()
 :	mInitialised(false)
@@ -135,7 +138,9 @@ IGraphicsContext::IGraphicsContext()
 IGraphicsContext::~IGraphicsContext()
 {
 	if (mInitialised)
-		glFinish();
+	{
+		Citro3D::EndGameFrame();
+	}
 	for (u32 b = 0; b < kNumVertexBanks; ++b)
 	{
 		if (mVtxBanks[b] != nullptr)
@@ -157,55 +162,46 @@ void IGraphicsContext::SelectVertexBank(u32 bank)
 
 bool IGraphicsContext::Initialise()
 {
-	if (gVtxBufferPtr == nullptr)
+	if (gVtxBufferPtr == nullptr || !Citro3D::IsInitialised())
 		return false;
 
 	mInitialised = true;
-
-	pglSelectScreen(GFX_TOP, GFX_LEFT);
-	ClearAllSurfaces();
-
+	newFrame = true;
 	return true;
 }
 
 void IGraphicsContext::ClearAllSurfaces()
 {
+	Citro3D::EnsureGameFrameBegun();
 	ClearToBlack();
-	pglSwapBuffersEx(1, 0);
-	ClearToBlack();
-	pglSwapBuffersEx(1, 0);
+	Citro3D::EndGameFrame();
+	newFrame = true;
 }
 
 void IGraphicsContext::ClearToBlack()
 {
-	glViewport(0,0,400,240);
-	glDisable(GL_SCISSOR_TEST);
-
-	glDepthMask(GL_TRUE);
-	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-	glClearDepth( 1.0f );
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	Citro3D::EnsureGameFrameBegun();
+	Citro3D::SetViewportLandscape(0, 0, SCR_WIDTH, SCR_HEIGHT);
+	Citro3D::SetScissorLandscape(false, 0, 0, SCR_WIDTH, SCR_HEIGHT);
+	Citro3D::Clear(true, true, 0x00000000u, 0x00FFFFFFu);
 }
 
 void IGraphicsContext::ClearZBuffer()
 {
-	glDepthMask(GL_TRUE);
-	glClearDepth( 1.0f );
-	glClear( GL_DEPTH_BUFFER_BIT );
+	Citro3D::EnsureGameFrameBegun();
+	Citro3D::Clear(false, true, 0x00000000u, 0x00FFFFFFu);
 }
 
 void IGraphicsContext::ClearColBuffer(const c32 & colour)
 {
-	glClearColor( colour.GetRf(), colour.GetGf(), colour.GetBf(), colour.GetAf() );
-	glClear( GL_COLOR_BUFFER_BIT );
+	Citro3D::EnsureGameFrameBegun();
+	Citro3D::Clear(true, false, ColourToClearRGBA8(colour), 0x00FFFFFFu);
 }
 
 void IGraphicsContext::ClearColBufferAndDepth(const c32 & colour)
 {
-	glDepthMask(GL_TRUE);
-	glClearDepth( 1.0f );
-	glClearColor( colour.GetRf(), colour.GetGf(), colour.GetBf(), colour.GetAf() );
-	glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
+	Citro3D::EnsureGameFrameBegun();
+	Citro3D::Clear(true, true, ColourToClearRGBA8(colour), 0x00FFFFFFu);
 }
 
 void IGraphicsContext::ResetVertexBuffer()
@@ -216,19 +212,19 @@ void IGraphicsContext::ResetVertexBuffer()
 
 void IGraphicsContext::BeginFrame()
 {
-	if(newFrame)
+	if (newFrame)
 	{
-		ClearToBlack();
+		Citro3D::EnsureGameFrameBegun();
+		if (gCleanSceneEnabled)
+			ClearToBlack();
 		newFrame = false;
 	}
+	else if (!Citro3D::IsGameFrameActive())
+	{
+		Citro3D::EnsureGameFrameBegun();
+	}
 
-	glEnableClientState(GL_VERTEX_ARRAY);
-	glEnableClientState(GL_COLOR_ARRAY);
-	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-
-	glVertexPointer(3, GL_FLOAT, sizeof(DaedalusVtx), &gVtxBufferPtr[0].Position);
-	glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(DaedalusVtx), &gVtxBufferPtr[0].Colour);
-	glTexCoordPointer(2, GL_FLOAT, sizeof(DaedalusVtx), &gVtxBufferPtr[0].Texture);
+	Citro3D::SetVertexBuffer(gVtxBufferPtr, sizeof(DaedalusVtx));
 }
 
 void IGraphicsContext::EndFrame()
@@ -239,26 +235,35 @@ void IGraphicsContext::EndFrame()
 void IGraphicsContext::UpdateFrame(bool wait_for_vbl)
 {
 	(void)wait_for_vbl;
-	// The pause menu (FrontendCTR) owns the screen while it is open: it runs
-	// its own blocking picaGL loop, so the emulator must not swap behind its
-	// back. DrawInGameMenu runs here — never inside BeginFrame — because
-	// opening it mid-frame would present while the N64 frame is half built.
+
+	const u64 pres_t0 = svcGetSystemTick();
+
+	// Flush accumulated vertex data once before presenting or opening the pause UI.
+	if (gVertexCount > 0 && gVtxBufferPtr != nullptr)
+		Citro3D::FlushDataCache(gVtxBufferPtr, gVertexCount * sizeof(DaedalusVtx));
+
+	// Close the citro3d gameplay frame before the pause menu runs its own UI frame loop.
+	if (UI::IsCapturingInput())
+		Citro3D::EndGameFrame();
+
 	if (UI::DrawInGameMenu())
 	{
-		// A frame was presented by the menu itself (or the game was closed).
 		ResetVertexBuffer();
+		newFrame = true;
+		PerfCTR::Reset();
 		return;
 	}
 
-	// Only transfer the top screen during gameplay; skipping the idle bottom
-	// screen saves a full 320x240 GX_DisplayTransfer every frame on Old 3DS.
-	pglSwapBuffersEx(1, 0);
+	// Present top screen only (bottom target was not drawn on, so citro3d skips
+	// transferring the idle bottom screen — saving a full 320x240 DMA every frame).
+	Citro3D::EndGameFrame();
 
-	// Alternate between two linear vertex banks per frame so gVertexCount resets
-	// cleanly without triggering mid-scene glFinish() stalls at 20k/30k verts.
+	// Alternate between two linear vertex banks per frame so CPU writes to the
+	// next bank while PICA200 consumes the previous one.
 	SelectVertexBank(mCurrentBank ^ 1);
 	ResetVertexBuffer();
 
+	PerfCTR::AddPresent(svcGetSystemTick() - pres_t0);
 	newFrame = true;
 }
 
@@ -284,9 +289,6 @@ void IGraphicsContext::GetScreenSize(u32 * p_width, u32 * p_height) const
 }
 
 void IGraphicsContext::SetDebugScreenTarget(ETargetSurface buffer){}
-
 void IGraphicsContext::SaveScreenshot(const char* filename, s32 x, s32 y, u32 width, u32 height){}
-
 void IGraphicsContext::DumpScreenShot(){}
-
 void IGraphicsContext::StoreSaveScreenData(){}

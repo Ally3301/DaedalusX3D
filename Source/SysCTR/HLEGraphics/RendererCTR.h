@@ -1,10 +1,10 @@
 #pragma once
 
-#include <map>
-#include <set>
+#include <citro3d.h>
 
 #include "HLEGraphics/BaseRenderer.h"
 #include "SysCTR/HLEGraphics/BlendModes.h"
+#include "SysCTR/HLEGraphics/Combiner/PicaTEVCombiner.h"
 
 class CBlendStates;
 
@@ -42,69 +42,68 @@ public:
 
 	virtual void		Draw2DTexture(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, const CNativeTexture * texture);
 	virtual void		Draw2DTextureR(f32 x0, f32 y0, f32 x1, f32 y1, f32 x2, f32 y2, f32 x3, f32 y3, f32 s, f32 t, const CNativeTexture * texture);
-	
+
 	struct SBlendStateEntry
 	{
-		SBlendStateEntry() : OverrideFunction( NULL ), States( NULL ) {}
+		SBlendStateEntry() : OverrideFunction( NULL ), States( NULL ) { TevProgram.valid = false; }
 		OverrideBlendModeFn			OverrideFunction;
 		const CBlendStates *		States;
+		SPicaTevProgram				TevProgram;
 	};
 
-	SBlendStateEntry	LookupBlendState( u64 mux, bool two_cycles );
+	const SBlendStateEntry & LookupBlendState( u64 mux, bool two_cycles );
 
 private:
-	void				RenderUsingCurrentBlendMode(const float (&mat_project)[16], DaedalusVtx * p_vertices, u32 num_vertices, u32 triangle_mode, bool disable_zbuffer );
-	void				RenderUsingRenderSettings( const CBlendStates * states, DaedalusVtx * p_vertices, u32 num_vertices, u32 triangle_mode );
-	void                DrawPrimitives(DaedalusVtx * p_vertices, u32 num_vertices, u32 triangle_mode, bool has_texture);
-	
-	// Original colours for the common multipass case; expressions only modify Colour.
+	void				RenderUsingCurrentBlendMode(const float (&mat_project)[16], DaedalusVtx * p_vertices, u32 num_vertices, GPU_Primitive_t triangle_mode, bool disable_zbuffer );
+	void				RenderUsingRenderSettings( const CBlendStates * states, DaedalusVtx * p_vertices, u32 num_vertices, GPU_Primitive_t triangle_mode );
+	void				DrawPrimitives(DaedalusVtx * p_vertices, u32 num_vertices, GPU_Primitive_t triangle_mode, bool has_texture);
+
+	// Original colours for the fallback multipass case; expressions only modify Colour.
 	u32					mVtx_Save[320];
-	
+
 	// BlendMode support
-	//
 	CBlendStates *		mCopyBlendStates;
 	CBlendStates *		mFillBlendStates;
 
-	typedef std::map< u64, SBlendStateEntry > BlendStatesMap;
-	BlendStatesMap		mBlendStatesMap;
-
-	static const u32	kBlendCacheSize = 64;
-	struct SBlendCacheSlot
+	// Flat open-addressed hash table (zero heap pointer chasing on ARM11).
+	static const u32	kBlendTableSize = 512;
+	struct SBlendTableSlot
 	{
-		SBlendCacheSlot() : key( 0 ), valid( false ) {}
-		u64				key;
-		SBlendStateEntry entry;
-		bool			valid;
+		SBlendTableSlot() : key( 0 ), occupied( false ) {}
+		u64					key;
+		SBlendStateEntry	entry;
+		bool				occupied;
 	};
-	SBlendCacheSlot		mBlendCache[kBlendCacheSize];
+	SBlendTableSlot		mBlendTable[kBlendTableSize];
+	SBlendStateEntry	mOverflowEntry;
 
-	// Lightweight GL state cache to avoid redundant picaGL state changes per draw.
-	struct SGlStateCache
-	{
-		bool   valid;
-		bool   depthTest;
-		bool   depthMask;
-		bool   decalOffset;
-		bool   blend;
-		u32    blendSrc;
-		u32    blendDst;
-		bool   alphaTest;
-		u32    alphaFunc;
-		float  alphaRef;
-		bool   tex2d;
-		bool   mForceTexRebind;
-		u32    texEnvMode;
-		const float * projPtr;
-		u32    projGen;
-	};
-	SGlStateCache		mGlCache;
+	// Projection & TEV state caches to avoid redundant GPU uploads.
+	const float *		mLastProjPtr;
+	u32					mLastProjGen;
+	const SPicaTevProgram * mLastTevProg;
+	u32					mLastTevPrim;
+	u32					mLastTevEnv;
+	u8					mLastTevPrimLod;
 
-	void				ApplyBlendState(bool enable, u32 src = 0, u32 dst = 0);
-	void				ApplyDepthState(bool enable, bool mask, bool decal);
-	void				ApplyAlphaState(bool enable, u32 func = 0, float ref = 0.0f);
-	void				ApplyTexture2DState(bool enable);
-	void				InstallNativeTexture(const CNativeTexture * texture, u32 wrap_s = 0, u32 wrap_t = 0);
-	void				ApplyTexEnvMode(u32 mode);
+	// Fast-path signature cache for back-to-back RenderUsingCurrentBlendMode calls.
+	bool				mFastStateValid;
+	u64					mFastMux;
+	u64					mFastOtherMode;
+	u32					mFastTnlFlags;
+	bool				mFastDisableZ;
+	u32					mFastPrimCol;
+	u32					mFastEnvCol;
+	u32					mFastBlendCol;
+	u8					mFastPrimLod;
+	const CNativeTexture * mFastTex0;
+	const CNativeTexture * mFastTex1;
+	u32					mFastWrap0U;
+	u32					mFastWrap0V;
+	u32					mFastWrap1U;
+	u32					mFastWrap1V;
+	bool				mFastHasTex;
+
+	void				InstallNativeTexture(const CNativeTexture * texture, u32 wrap_s = GPU_CLAMP_TO_EDGE, u32 wrap_t = GPU_CLAMP_TO_EDGE, int unit = 0);
 	void				ApplyProjectionMatrix(const float (&mat_project)[16]);
 	void				InitBlenderModeCached();
 };

@@ -36,7 +36,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #endif
 
 #ifdef DAEDALUS_CTR
-#include <GL/picaGL.h>
+#include <citro3d.h>
 #endif
 
 class c32;
@@ -69,8 +69,11 @@ class CNativeTexture : public CRefCounted
 		inline void *					GetData()						{ return mpData; }
 
 #if defined(DAEDALUS_CTR)
-		inline GLuint					GetTextureId() const				{ return mTextureId; }
-		void							ApplyParams( GLint filter, GLint wrap_s, GLint wrap_t ) const;
+		inline C3D_Tex *				GetC3DTexture() const				{ return mHasTex ? &mTex : nullptr; }
+		void							ApplyParams( GPU_TEXTURE_FILTER_PARAM filter, GPU_TEXTURE_WRAP_PARAM wrap_s, GPU_TEXTURE_WRAP_PARAM wrap_t ) const;
+		void							SetDataRaw5551( const u16 * pixels, u32 src_w, u32 src_h );
+		bool							UploadDirectN64RGBA16( const u8 * rdram, u32 load_addr, u32 pitch, bool swapped );
+		bool							UploadDirectN64CI( const u8 * rdram, u32 load_addr, u32 pitch, u32 tlut_addr, bool is_ci8, bool swapped );
 #endif
 		
 #if defined(DAEDALUS_PSP) || defined(DAEDALUS_VITA) || defined(DAEDALUS_CTR)
@@ -92,14 +95,16 @@ class CNativeTexture : public CRefCounted
 		void *				mpData;
 		void *				mpPalette;
 
-#if defined(DAEDALUS_GL) || defined(DAEDALUS_VITA) || defined(DAEDALUS_CTR)
+#if defined(DAEDALUS_GL) || defined(DAEDALUS_VITA)
 		GLuint				mTextureId;
 #endif
 #if defined(DAEDALUS_CTR)
-		bool				mGpuStorageInitialised;
-		mutable GLint		mCachedFilter;
-		mutable GLint		mCachedWrapS;
-		mutable GLint		mCachedWrapT;
+		mutable C3D_Tex		mTex;
+		bool				mHasTex;
+		bool				mOnVram;
+		mutable int			mCachedFilter;
+		mutable int			mCachedWrapS;
+		mutable int			mCachedWrapT;
 #endif
 
 #if defined(DAEDALUS_PSP) || defined(DAEDALUS_VITA) || defined(DAEDALUS_CTR)

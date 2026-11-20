@@ -47,6 +47,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "uCodes/Ucode.h"
 #include "Utility/IO.h"
 #include "Utility/Profiler.h"
+#ifdef DAEDALUS_CTR
+#include "SysCTR/Utility/PerfProfilerCTR.h"
+#endif
 
 
 #ifdef DAEDALUS_DEBUG_DISPLAYLIST
@@ -525,12 +528,18 @@ u32 DLParser_Process(u32 instruction_limit, DLDebugOutput * debug_output)
 
 	if(!gFrameskipActive)
 	{
+#ifdef DAEDALUS_CTR
+		const u64 dl_t0 = svcGetSystemTick();
+#endif
 		gRenderer->SetVIScales();
 		gRenderer->ResetMatrices(stack_size);
 		gRenderer->Reset();
 		gRenderer->BeginScene();
 		count = DLParser_ProcessDList(instruction_limit);
 		gRenderer->EndScene();
+#ifdef DAEDALUS_CTR
+		PerfCTR::AddDL(svcGetSystemTick() - dl_t0);
+#endif
 	}
 	else
 	{
@@ -1047,7 +1056,7 @@ void DLParser_FillRect( MicroCodeCommand command )
 	{
 		CGraphicsContext::Get()->ClearZBuffer();
 
-#ifdef DAEDALUS_PSP
+#if defined(DAEDALUS_PSP) || defined(DAEDALUS_CTR)
 		if(gClearDepthFrameBuffer)
 #else
 		if(true)	//This always enabled for PC, this should be optional once we have a GUI to disable it!

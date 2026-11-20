@@ -21,6 +21,7 @@ daedbuild/
 build/
 build-3ds/
 build-3ds-local/
+references/
 Dumps/
 Roms/
 SaveGames/

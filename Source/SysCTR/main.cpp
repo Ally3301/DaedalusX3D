@@ -4,7 +4,7 @@
 #include <dirent.h>
 
 #include <3ds.h>
-#include <GL/picaGL.h>
+#include "SysCTR/Graphics/Citro3DContext.h"
 
 #include "BuildOptions.h"
 #include "Config/ConfigOptions.h"
@@ -180,31 +180,30 @@ static bool CheckDSPFirmware()
 		return true;
 	}
 
-	gfxInitDefault();
-	consoleInit(GFX_BOTTOM, NULL);
-
-	printf("DSP Firmware not found!\n\n");
-	printf("Press START to exit\n");
-
-	while(aptMainLoop())
-	{
-		hidScanInput();
-
-		if(hidKeysDown() & KEY_START)
-			break;
-		gspWaitForVBlank();
-	}
-	gfxExit();
-	return false;
+	// Continue without blocking startup if dspfirm.cdc is absent (e.g. fresh emulator setup).
+	LogStartup("startup: sdmc:/3ds/dspfirm.cdc not found; audio disabled");
+	enable_audio = APM_DISABLED;
+	return true;
 }
 
 extern u32 __ctru_heap_size;
 extern u32 __ctru_linear_heap_size;
 
+static void EnableVfpRunFast()
+{
+	// Enable ARM11 VFPv2 RunFast mode (FZ=bit 24, DN=bit 25):
+	// flushes denormals to zero and uses default NaNs, avoiding slow hardware
+	// VFP support-code traps on denormal floats during N64 emulation.
+	u32 fpscr = 0;
+	__asm__ volatile("fmrx %0, fpscr" : "=r"(fpscr));
+	fpscr |= (1u << 24) | (1u << 25);
+	__asm__ volatile("fmxr fpscr, %0" : : "r"(fpscr));
+}
+
 static bool Initialize()
 {
-	if (!CheckDSPFirmware())
-		return false;
+	EnableVfpRunFast();
+	CheckDSPFirmware();
 
 	// Detect the hardware before allocating the model-specific dynarec buffers.
 	APT_CheckNew3DS(&isN3DS);
@@ -218,33 +217,23 @@ static bool Initialize()
 	const int svc_access = _DetectSvcAccess();
 	const int svc_hack = _InitializeSvcHack();
 	const int is_emulator = _RunningInEmulator();
-	LogStartup("startup: svc access %d, svc hack %d, emulator %d, process heap %u KiB, linear heap %u KiB",
-		svc_access, svc_hack, is_emulator, (unsigned)(__ctru_heap_size / 1024),
+	const int probe = _ProbeExecutableMemory();
+	LogStartup("startup: svc access %d, svc hack %d, emulator %d, rwx probe %d, process heap %u KiB, linear heap %u KiB",
+		svc_access, svc_hack, is_emulator, probe, (unsigned)(__ctru_heap_size / 1024),
 		(unsigned)(__ctru_linear_heap_size / 1024));
 
 	int code_buffer_error = 0;
-	if (is_emulator)
+	if (probe >= 0 && gFragmentCache.InitialiseCodeBuffer(&code_buffer_error))
 	{
-		// Citra/Azahar never run the kernel cache flush the dynarec needs, so
-		// generated code goes stale there and crashes.
-		LogStartup("startup: PC emulator, dynarec disabled");
-		ReportInterpreterFallback("Running under a PC emulator (Citra/Azahar).", 0);
-	}
-	else if (!gFragmentCache.InitialiseCodeBuffer(&code_buffer_error))
-	{
-		const int probe = _ProbeExecutableMemory();
-		LogStartup("startup: code buffer failed (%08x), rwx probe %08x",
-			(unsigned)code_buffer_error, (unsigned)probe);
-
-		ReportInterpreterFallback("Could not make memory executable.", code_buffer_error);
+		gDynarecAvailable = true;
+		LogStartup("startup: ARM dynarec enabled (emulator=%d)", is_emulator);
 	}
 	else
 	{
-		gDynarecAvailable = true;
-		if (!svc_hack)
-		{
-			LogStartup("startup: svc hack not verified, code buffer is executable anyway");
-		}
+		LogStartup("startup: code buffer failed (%08x), rwx probe %08x",
+			(unsigned)code_buffer_error, (unsigned)probe);
+		if (!is_emulator)
+			ReportInterpreterFallback("Could not make memory executable.", code_buffer_error);
 	}
 
 	LogStartup("startup: dynarec buffers primary=%u MiB secondary=%u MiB",
@@ -256,16 +245,18 @@ static bool Initialize()
 	aptHook(&gAptHookCookie, OnAptHook, nullptr);
 	BorrowSyscore();
 	
-	gfxInit(GSP_BGR8_OES, GSP_BGR8_OES, true);
+	gfxInitDefault();
 
-	if(isN3DS)
-		gfxSetWide(true);
-
-	// Single GPU library: picaGL owns the GX queue end to end. The frontend
-	// (FrontendCTR) draws through the same library, so there is no second
-	// command-queue owner to interleave with — the old citro3d/citro2d stack
-	// crashed on hardware in every init order.
-	pglInitEx(0x080000, 0x040000);
+	// Single GPU library: citro3d owns the GX queue end to end for both gameplay
+	// (RendererCTR) and the two-screen frontend (FrontendCTR).
+	if (!Citro3D::Init())
+	{
+		LogStartup("startup: Citro3D::Init failed");
+		gfxExit();
+		romfsExit();
+		return false;
+	}
+	LogStartup("startup: Citro3D::Init ok");
 
 	strcpy(gDaedalusExePath, DAEDALUS_CTR_PATH(""));
 	strcpy(g_DaedalusConfig.mSaveDir, DAEDALUS_CTR_PATH("SaveGames/"));
@@ -273,20 +264,24 @@ static bool Initialize()
 	IO::Directory::EnsureExists( DAEDALUS_CTR_PATH("SaveStates/") );
 	if (!System_Init())
 	{
-		pglExit();
+		LogStartup("startup: System_Init failed");
+		Citro3D::Shutdown();
 		gfxExit();
 		romfsExit();
 		return false;
 	}
+	LogStartup("startup: System_Init ok");
 
 	if (!FrontendCTR::Initialise())
 	{
+		LogStartup("startup: FrontendCTR::Initialise failed");
 		System_Finalize();
-		pglExit();
+		Citro3D::Shutdown();
 		gfxExit();
 		romfsExit();
 		return false;
 	}
+	LogStartup("startup: FrontendCTR::Initialise ok");
 	return true;
 }
 
@@ -308,9 +303,32 @@ int main(int argc, char* argv[])
 	if (!Initialize())
 		return 1;
 	
+	bool usedAutoboot = false;
 	while(shouldQuit == false)
 	{
-		std::string rom = UI::DrawRomSelector();
+		std::string rom;
+		if (!usedAutoboot)
+		{
+			FILE * ab = fopen(DAEDALUS_CTR_PATH("autoboot.txt"), "r");
+			if (ab != nullptr)
+			{
+				char line[256] = {};
+				if (fgets(line, sizeof(line), ab) != nullptr)
+				{
+					size_t len = strlen(line);
+					while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+						line[--len] = '\0';
+					if (len > 0)
+					{
+						rom = line;
+						usedAutoboot = true;
+					}
+				}
+				fclose(ab);
+			}
+		}
+		if (rom.empty())
+			rom = UI::DrawRomSelector();
 		if (rom.empty())
 		{
 			if (!aptMainLoop())
@@ -341,10 +359,13 @@ int main(int argc, char* argv[])
 	}
 	
 	aptUnhook(&gAptHookCookie);
+	if (gAppCpuLimit > 30)
+		APT_SetAppCpuTimeLimit(30);
 
-	System_Finalize();
 	FrontendCTR::Shutdown();
-	pglExit();
+	System_Finalize();
+	gFragmentCache.FinaliseCodeBuffer();
+	Citro3D::Shutdown();
 	gfxExit();
 	romfsExit();
 

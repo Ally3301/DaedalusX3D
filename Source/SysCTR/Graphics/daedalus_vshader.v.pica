@@ -1,0 +1,45 @@
+; Minimal PICA200 vertex shader for DaedalusX3D (citro3d backend)
+; Optimized for Old 3DS vertex throughput: 12 instructions total.
+; Supports dual hardware texturing (TEXUNIT0 + TEXUNIT1 with independent tile UV transform).
+;
+; Vertex layout matches DaedalusVtx (24 bytes, zero CPU repacking):
+;   v0: float2 Texture  (offset 0)
+;   v1: ubyte4 Colour   (offset 8, unnormalized 0..255 -> scaled by 1/255)
+;   v2: float3 Position (offset 12)
+
+.fvec projection[4]
+.fvec uv1_xform
+
+; (1.0/255.0, 1.0, 0.0, 0.0)
+.constf c_const(0.00392156862745098, 1.0, 0.0, 0.0)
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+
+.alias inuv  v0
+.alias inclr v1
+.alias inpos v2
+
+.proc main
+	mov r0.xyz, inpos
+	mov r0.w,   c_const.y
+
+	dp4 outpos.x, projection[0], r0
+	dp4 outpos.y, projection[1], r0
+	dp4 outpos.z, projection[2], r0
+	dp4 outpos.w, projection[3], r0
+
+	mul outclr, c_const.xxxx, inclr
+	mov outtc0, inuv
+
+	; outtc1 = inuv * uv1_xform.xy + uv1_xform.zw
+	; Always write all 4 components (.xyzw) of output registers in a single instruction
+	; (real PICA200 hardware requires full output register initialization).
+	mov r1, c_const.zzzz
+	mul r1.xy, uv1_xform.xy, inuv
+	add r1.xy, uv1_xform.zw, r1
+	mov outtc1, r1
+	end
+.end

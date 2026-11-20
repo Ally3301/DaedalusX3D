@@ -6,7 +6,7 @@
 #include "SysCTR/HLEGraphics/RendererCTR.h"
 
 #include <3ds.h>
-#include <GL/picaGL.h>
+#include "SysCTR/Graphics/Citro3DContext.h"
 
 namespace
 {
@@ -84,14 +84,8 @@ void EndRomSession()
 
 void RestoreRenderState()
 {
-    // Back to the emulator's GL surface and default states after any menu pass.
-    pglSelectScreen(GFX_TOP, GFX_LEFT);
-    glDisable(GL_SCISSOR_TEST);
-    glViewport(0, 0, 400, 240);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
+    // Back to the emulator's citro3d top-screen surface and default states after any menu pass.
+    Citro3D::RestoreDefaultGameState();
     if (gRendererCTR != nullptr)
         gRendererCTR->RestoreRenderStates();
 }
