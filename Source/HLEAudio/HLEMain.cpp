@@ -116,7 +116,7 @@ inline void Audio_Ucode_Detect(OSTask * pTask)
 //*****************************************************************************
 //
 //*****************************************************************************
-void Audio_Ucode_Task( const OSTask & task )
+void Audio_Ucode_Task_WithAlist( const OSTask & task, const u32 * p_alist, u32 ucode_size )
 {
 	#ifdef DAEDALUS_PROFILE
 	DAEDALUS_PROFILE( "HLEMain::Audio_Ucode" );
@@ -132,15 +132,8 @@ void Audio_Ucode_Task( const OSTask & task )
 
 	gAudioHLEState.LoopVal = 0;
 
-	const u32 data_ptr = (u32)task.t.data_ptr & 0x00FFFFFFu;
-	if (data_ptr >= gRamSize)
+	if (p_alist == nullptr || ucode_size == 0)
 		return;
-
-	u32 * p_alist = (u32 *)(g_pu8RamBase + data_ptr);
-	u32 ucode_size = (task.t.data_size >> 3);	//ABI5 can return 0 here!!!
-	const u32 max_cmds = (gRamSize - data_ptr) >> 3;
-	if (ucode_size > max_cmds)
-		ucode_size = max_cmds;
 
 	while( ucode_size )
 	{
@@ -152,6 +145,21 @@ void Audio_Ucode_Task( const OSTask & task )
 
 		--ucode_size;
 	}
+}
+
+void Audio_Ucode_Task( const OSTask & task )
+{
+	const u32 data_ptr = (u32)task.t.data_ptr & 0x00FFFFFFu;
+	if (data_ptr >= gRamSize)
+		return;
+
+	const u32 * p_alist = (const u32 *)(g_pu8RamBase + data_ptr);
+	u32 ucode_size = (task.t.data_size >> 3);	//ABI5 can return 0 here!!!
+	const u32 max_cmds = (gRamSize - data_ptr) >> 3;
+	if (ucode_size > max_cmds)
+		ucode_size = max_cmds;
+
+	Audio_Ucode_Task_WithAlist( task, p_alist, ucode_size );
 }
 
 void Audio_Ucode()

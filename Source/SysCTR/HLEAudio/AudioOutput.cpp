@@ -221,7 +221,17 @@ void AudioOutput::AddBuffer( u8 *start, u32 length )
 	if (!mAudioPlaying)
 		return;
 
-	mAudioBuffer->AddSamples( reinterpret_cast< const Sample * >( start ), num_samples, mFrequency, DESIRED_OUTPUT_FREQUENCY );
+	// Natural 44.1 kHz output unless user explicitly turns on AudioRateMatch.
+	u32 output_freq = DESIRED_OUTPUT_FREQUENCY;
+	if (gAudioRateMatch)
+	{
+		if (gSoundSync > DESIRED_OUTPUT_FREQUENCY * 2)
+			output_freq = DESIRED_OUTPUT_FREQUENCY * 2;
+		else if (gSoundSync > DESIRED_OUTPUT_FREQUENCY)
+			output_freq = gSoundSync;
+	}
+
+	mAudioBuffer->AddSamples( reinterpret_cast< const Sample * >( start ), num_samples, mFrequency, output_freq );
 	UpdatePlaybackRate();
 }
 

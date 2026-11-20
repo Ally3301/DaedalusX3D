@@ -438,6 +438,7 @@ void UNKNOWN(AudioHLECommand command);
 #include "OSHLE/ultra_sptask.h"
 void Audio_Ucode();
 void Audio_Ucode_Task( const OSTask & task );
+void Audio_Ucode_Task_WithAlist( const OSTask & task, const u32 * p_alist, u32 num_cmds );
 void Audio_Reset();
 
 #endif // HLEAUDIO_AUDIOHLE_H_

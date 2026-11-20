@@ -37,6 +37,8 @@ CAudioBuffer::CAudioBuffer( u32 buffer_size )
 	,	mBufferSize( mBufferBegin != nullptr ? buffer_size : 0 )
 	,	mReadIndex( 0 )
 	,	mWriteIndex( 0 )
+	,	mLastDrainSample{ 0, 0 }
+	,	mInUnderrun( false )
 {
 }
 
@@ -191,14 +193,43 @@ u32	CAudioBuffer::Drain( Sample * samples, u32 num_samples )
 		if (read_idx >= mBufferSize)
 			read_idx -= mBufferSize;
 		mReadIndex.store( read_idx, std::memory_order_release );
+
+		// If recovering from an underrun, smoothly crossfade the first 32 samples
+		// from mLastDrainSample into the new audio stream to eliminate pops/clicks.
+		if (mInUnderrun)
+		{
+			const u32 fade_len = (to_copy < 32) ? to_copy : 32;
+			const s32 prevL = mLastDrainSample.L;
+			const s32 prevR = mLastDrainSample.R;
+			for (u32 i = 0; i < fade_len; ++i)
+			{
+				const s32 w = static_cast<s32>(i + 1);
+				samples[i].L = static_cast<s16>(((prevL * (32 - w)) + (static_cast<s32>(samples[i].L) * w)) >> 5);
+				samples[i].R = static_cast<s16>(((prevR * (32 - w)) + (static_cast<s32>(samples[i].R) * w)) >> 5);
+			}
+			mInUnderrun = false;
+		}
+		mLastDrainSample = samples[to_copy - 1];
 	}
 
 	//
-	//	If there weren't enough samples, zero out the buffer
+	//	If there weren't enough samples, smoothly decay the last sample toward 0
+	//	instead of hard-zeroing (which causes loud square-wave pops/crackles).
 	//
 	if (to_copy < num_samples)
 	{
-		memset( samples + to_copy, 0, (num_samples - to_copy) * sizeof( Sample ) );
+		mInUnderrun = true;
+		s32 curL = mLastDrainSample.L;
+		s32 curR = mLastDrainSample.R;
+		for (u32 i = to_copy; i < num_samples; ++i)
+		{
+			curL = (curL * 248) >> 8;
+			curR = (curR * 248) >> 8;
+			samples[i].L = static_cast<s16>(curL);
+			samples[i].R = static_cast<s16>(curR);
+		}
+		mLastDrainSample.L = static_cast<s16>(curL);
+		mLastDrainSample.R = static_cast<s16>(curR);
 	}
 
 	// Return the number of samples written

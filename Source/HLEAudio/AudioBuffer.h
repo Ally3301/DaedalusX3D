@@ -55,6 +55,8 @@ private:
 
 	std::atomic<u32>		mReadIndex;
 	std::atomic<u32>		mWriteIndex;
+	Sample					mLastDrainSample;
+	bool					mInUnderrun;
 };
 
 
