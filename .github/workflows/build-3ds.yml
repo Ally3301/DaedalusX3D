@@ -29,7 +29,7 @@ jobs:
       - name: Install build tools and 3DS portlibs
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends cmake curl unzip ca-certificates
+          apt-get install -y --no-install-recommends build-essential cmake curl unzip ca-certificates git
           dkp-pacman -Syu --noconfirm 3ds-libpng 3ds-zlib
           if [ ! -f "$DEVKITPRO/portlibs/3ds/lib/libpng.a" ] && [ -f "$DEVKITPRO/portlibs/3ds/lib/libpng16.a" ]; then
             ln -s libpng16.a "$DEVKITPRO/portlibs/3ds/lib/libpng.a"
@@ -43,13 +43,20 @@ jobs:
           unzip -o /tmp/ctr-tools/makerom.zip -d /tmp/ctr-tools/makerom
           MAKEROM_BIN=$(find /tmp/ctr-tools/makerom -type f -name makerom | head -n 1)
           install -m 0755 "$MAKEROM_BIN" /usr/local/bin/makerom
+          if ! /usr/local/bin/makerom -h >/dev/null 2>&1; then
+            git clone --depth 1 --branch makerom-v0.19.0 https://github.com/3DSGuy/Project_CTR.git /tmp/ctr-tools/Project_CTR
+            make -C /tmp/ctr-tools/Project_CTR/makerom deps -j"$(nproc)"
+            make -C /tmp/ctr-tools/Project_CTR/makerom -j"$(nproc)"
+            install -m 0755 /tmp/ctr-tools/Project_CTR/makerom/bin/makerom /usr/local/bin/makerom
+          fi
 
-          curl -fSL "https://github.com/carstene1ns/3ds-bannertool/releases/download/1.2.3/bannertool-1.2.3-linux.tar.gz" \
-            -o /tmp/ctr-tools/bannertool.tar.gz
-          mkdir -p /tmp/ctr-tools/bannertool
-          tar -xzf /tmp/ctr-tools/bannertool.tar.gz -C /tmp/ctr-tools/bannertool
-          BANNERTOOL_BIN=$(find /tmp/ctr-tools/bannertool -type f -name bannertool | head -n 1)
-          install -m 0755 "$BANNERTOOL_BIN" /usr/local/bin/bannertool
+          curl -fSL "https://github.com/carstene1ns/3ds-bannertool/releases/download/1.2.3/bannertool-1.2.3.tar.gz" \
+            -o /tmp/ctr-tools/bannertool-src.tar.gz
+          mkdir -p /tmp/ctr-tools/bannertool-src
+          tar -xzf /tmp/ctr-tools/bannertool-src.tar.gz -C /tmp/ctr-tools/bannertool-src --strip-components=1
+          cmake -S /tmp/ctr-tools/bannertool-src -B /tmp/ctr-tools/bannertool-build -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/ctr-tools/bannertool-build -j"$(nproc)"
+          install -m 0755 /tmp/ctr-tools/bannertool-build/bannertool /usr/local/bin/bannertool
           rm -rf /tmp/ctr-tools
 
       - name: Generate SMDH and banner resources
