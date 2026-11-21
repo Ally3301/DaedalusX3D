@@ -52,9 +52,71 @@ static unsigned int waveBuf_id;
 
 bool audioOpen = false;
 
+static LightLock sNdspLock;
+static bool      sNdspLockInit   = false;
+static int       sNdspRefCount   = 0;
+static bool      sNdspInitFailed = false;
+
 static AudioOutput * ac = nullptr;
 
 CAudioBuffer *mAudioBuffer = nullptr;
+
+bool AudioOutput::AcquireNdsp()
+{
+	if (!sNdspLockInit)
+	{
+		LightLock_Init(&sNdspLock);
+		sNdspLockInit = true;
+	}
+
+	LightLock_Lock(&sNdspLock);
+	if (sNdspRefCount > 0)
+	{
+		++sNdspRefCount;
+		LightLock_Unlock(&sNdspLock);
+		return true;
+	}
+	if (sNdspInitFailed)
+	{
+		LightLock_Unlock(&sNdspLock);
+		return false;
+	}
+	if (ndspInit() != 0)
+	{
+		sNdspInitFailed = true;
+		LightLock_Unlock(&sNdspLock);
+		return false;
+	}
+	ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+	sNdspRefCount = 1;
+	LightLock_Unlock(&sNdspLock);
+	return true;
+}
+
+void AudioOutput::ReleaseNdsp()
+{
+	if (!sNdspLockInit)
+		return;
+
+	LightLock_Lock(&sNdspLock);
+	if (sNdspRefCount > 0)
+	{
+		--sNdspRefCount;
+		if (sNdspRefCount == 0)
+		{
+			ndspExit();
+		}
+	}
+	LightLock_Unlock(&sNdspLock);
+}
+
+void AudioOutput::SetGamePaused( bool paused )
+{
+	if (audioOpen)
+	{
+		ndspChnSetPaused(0, paused);
+	}
+}
 
 static void audioCallback(void *arg)
 {
@@ -85,12 +147,17 @@ static bool AudioInit()
 	for (u32 i = 0; i < CTR_BUFFER_COUNT; ++i)
 		waveBuf[i] = {};
 
-	if (ndspInit() != 0)
+	if (!AudioOutput::AcquireNdsp())
 		return false;
 
-	ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+	ndspChnReset(0);
+	ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
 	ndspChnSetFormat(0, NDSP_FORMAT_STEREO_PCM16);
 	ndspChnSetRate(0, DESIRED_OUTPUT_FREQUENCY);
+	float mix[12] = {};
+	mix[0] = 1.0f;
+	mix[1] = 1.0f;
+	ndspChnSetMix(0, mix);
 
 	for (u32 i = 0; i < CTR_BUFFER_COUNT; ++i)
 	{
@@ -98,7 +165,9 @@ static bool AudioInit()
 		if (waveBuf[i].data_vaddr == nullptr)
 		{
 			ndspChnWaveBufClear(0);
-			ndspExit();
+			for (int wait = 0; wait < 20 && ndspChnIsPlaying(0); ++wait)
+				svcSleepThread(1000000LL);
+			AudioOutput::ReleaseNdsp();
 			for (u32 j = 0; j < i; ++j)
 			{
 				linearFree(const_cast<void *>(waveBuf[j].data_vaddr));
@@ -128,9 +197,15 @@ static void AudioExit()
 	// Stop stream
 	if (audioOpen)
 	{
+		audioOpen = false;
 		ndspSetCallback(nullptr, nullptr);
+		ndspChnSetPaused(0, false);
 		ndspChnWaveBufClear(0);
-		ndspExit();
+		// Wait briefly for the DSP frame to process the clear command before
+		// freeing Linear RAM when NDSP remains active for UI SFX channels.
+		for (int wait = 0; wait < 20 && ndspChnIsPlaying(0); ++wait)
+			svcSleepThread(1000000LL);
+		AudioOutput::ReleaseNdsp();
 	}
 
 	for (u32 i = 0; i < CTR_BUFFER_COUNT; ++i)

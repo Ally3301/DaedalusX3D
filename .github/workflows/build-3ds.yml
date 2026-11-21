@@ -1,0 +1,88 @@
+name: Build 3DS (DaedalusX3D)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    name: CTR Host Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run CTR host unit tests
+        run: sh tests/ctr_host/run.sh
+
+  build-3ds:
+    name: Build 3DS (.3dsx & .cia)
+    runs-on: ubuntu-latest
+    needs: host-tests
+    container:
+      image: devkitpro/devkitarm:latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools and 3DS portlibs
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake curl unzip ca-certificates
+          dkp-pacman -Syu --noconfirm 3ds-libpng 3ds-zlib
+          if [ ! -f "$DEVKITPRO/portlibs/3ds/lib/libpng.a" ] && [ -f "$DEVKITPRO/portlibs/3ds/lib/libpng16.a" ]; then
+            ln -s libpng16.a "$DEVKITPRO/portlibs/3ds/lib/libpng.a"
+          fi
+
+      - name: Install makerom and bannertool
+        run: |
+          mkdir -p /tmp/ctr-tools
+          curl -fSL "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.19.0/makerom-v0.19.0-ubuntu_x86_64.zip" \
+            -o /tmp/ctr-tools/makerom.zip
+          unzip -o /tmp/ctr-tools/makerom.zip -d /tmp/ctr-tools/makerom
+          MAKEROM_BIN=$(find /tmp/ctr-tools/makerom -type f -name makerom | head -n 1)
+          install -m 0755 "$MAKEROM_BIN" /usr/local/bin/makerom
+
+          curl -fSL "https://github.com/carstene1ns/3ds-bannertool/releases/download/1.2.3/bannertool-1.2.3-linux.tar.gz" \
+            -o /tmp/ctr-tools/bannertool.tar.gz
+          mkdir -p /tmp/ctr-tools/bannertool
+          tar -xzf /tmp/ctr-tools/bannertool.tar.gz -C /tmp/ctr-tools/bannertool
+          BANNERTOOL_BIN=$(find /tmp/ctr-tools/bannertool -type f -name bannertool | head -n 1)
+          install -m 0755 "$BANNERTOOL_BIN" /usr/local/bin/bannertool
+          rm -rf /tmp/ctr-tools
+
+      - name: Generate SMDH and banner resources
+        run: |
+          export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
+          smdhtool --create \
+            "DaedalusX3D" \
+            "Nintendo 64 Emulator for Old & New 3DS" \
+            "DaedalusX3D" \
+            Source/SysCTR/Resources/icon.png \
+            Source/SysCTR/Resources/daedalus.smdh
+
+          bannertool makebanner \
+            -i Source/SysCTR/Resources/banner.png \
+            -a Source/SysCTR/Resources/audio_silent.wav \
+            -o Source/SysCTR/Resources/banner.bnr
+
+      - name: Configure and build DaedalusX64 (.3dsx & .cia)
+        run: |
+          export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
+          cmake -S Source -B build-3ds \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/Tools/3dstoolchain.cmake" \
+            -DCTR_RELEASE=ON \
+            -DDAEDALUS_CTR_DEPS_DIR="$DEVKITPRO/portlibs/3ds"
+          cmake --build build-3ds --target N3DS -j"$(nproc)"
+          ls -lh build-3ds/DaedalusX64.3dsx build-3ds/DaedalusX64.cia build-3ds/DaedalusX64.elf
+
+      - name: Upload 3DS release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: DaedalusX3D-3DS-build
+          path: |
+            build-3ds/DaedalusX64.3dsx
+            build-3ds/DaedalusX64.cia
+            build-3ds/DaedalusX64.elf
+          if-no-files-found: error

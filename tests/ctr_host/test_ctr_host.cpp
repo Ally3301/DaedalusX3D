@@ -6,10 +6,12 @@
 #include "SysCTR/UI/UITouchInput.h"
 #include "SysCTR/UI/TouchControllerCTR.h"
 #include "SysCTR/UI/CoverScraperCTR.h"
+#include "SysCTR/UI/UISound.h"
 #include "DynaRec/FragmentCacheCoverage.h"
 #include <3ds.h>
 
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <new>
@@ -381,6 +383,117 @@ void test_cover_scraper() {
     }
     CHECK(foundNoIntroThe);
 }
+
+void test_ui_sound() {
+    using namespace UI;
+
+    // 1) Volume presets & state persistence
+    CHECK(Sound::GetVolume() == SFX_VOL_MEDIUM);
+    CHECK(Sound::VolumeGain(SFX_VOL_OFF) == 0.0f);
+    CHECK(Sound::VolumeGain(SFX_VOL_LOW) > 0.0f && Sound::VolumeGain(SFX_VOL_LOW) < Sound::VolumeGain(SFX_VOL_MEDIUM));
+    CHECK(Sound::VolumeGain(SFX_VOL_MEDIUM) < Sound::VolumeGain(SFX_VOL_HIGH));
+    CHECK(Sound::VolumeGain(SFX_VOL_HIGH) <= 1.0f);
+    Sound::SetVolume(SFX_VOL_HIGH);
+    CHECK(Sound::GetVolume() == SFX_VOL_HIGH);
+    Sound::SetVolume(static_cast<ESfxVolume>(99)); // out-of-range resets safely
+    CHECK(Sound::GetVolume() == SFX_VOL_MEDIUM);
+
+    // 2) Pitch clamping & stereo pan
+    CHECK(Sound::ClampPitch(0.1f) == 0.5f);
+    CHECK(Sound::ClampPitch(1.06f) == 1.06f);
+    CHECK(Sound::ClampPitch(4.0f) == 2.0f);
+
+    float l = 0.0f, r = 0.0f;
+    Sound::ComputeStereoPan(0.6f, 0.0f, l, r);
+    CHECK(std::fabs(l - r) < 0.001f && std::fabs(l - 0.6f) < 0.01f);
+    Sound::ComputeStereoPan(0.6f, -0.5f, l, r);
+    CHECK(l > r && r > 0.0f);
+    Sound::ComputeStereoPan(0.6f, 0.5f, l, r);
+    CHECK(r > l && l > 0.0f);
+
+    // 3) Total PCM bank footprint must stay lightweight for Old 3DS Linear RAM (< 100 KiB)
+    const size_t bankBytes = Sound::ComputeTotalBankBytes();
+    CHECK(bankBytes > 32768u && bankBytes < 102400u);
+    CHECK((bankBytes % Sound::kClipAlignBytes) == 0u);
+
+    // 4) Every SFX clip must synthesize cleanly: non-zero energy, no clipping, click-free edges
+    std::vector<int16_t> buf;
+    std::vector<int16_t> confirmBuf;
+    std::vector<int16_t> backBuf;
+    std::vector<int16_t> saveBuf;
+    std::vector<int16_t> loadBuf;
+
+    for (int i = 0; i < SFX_COUNT; ++i) {
+        const ESoundId id = static_cast<ESoundId>(i);
+        const size_t count = Sound::GetSampleCount(id);
+        CHECK(count >= 500u && count <= 8000u);
+
+        buf.assign(count, 0);
+        // Reject undersized destination buffer
+        CHECK(Sound::Synthesize(id, buf.data(), count - 1u) == 0u);
+        CHECK(Sound::Synthesize(id, buf.data(), count) == count);
+
+        // Exact zero start & click-free end boundary
+        CHECK(buf[0] == 0);
+        CHECK(std::abs(static_cast<int>(buf[count - 1u])) <= 16);
+
+        // Energy & headroom (no hard clipping)
+        int maxAbs = 0;
+        double sumSq = 0.0;
+        for (size_t s = 0; s < count; ++s) {
+            const int v = std::abs(static_cast<int>(buf[s]));
+            if (v > maxAbs) maxAbs = v;
+            sumSq += static_cast<double>(buf[s]) * static_cast<double>(buf[s]);
+        }
+        const double rms = std::sqrt(sumSq / static_cast<double>(count));
+        CHECK(maxAbs >= 2500 && maxAbs <= 26000);
+        CHECK(rms >= 400.0);
+
+        if (id == SFX_CONFIRM)    confirmBuf = buf;
+        if (id == SFX_BACK)       backBuf    = buf;
+        if (id == SFX_SAVE_STATE) saveBuf    = buf;
+        if (id == SFX_LOAD_STATE) loadBuf    = buf;
+    }
+    CHECK(Sound::GetSampleCount(SFX_COUNT) == 0u);
+    CHECK(Sound::Synthesize(SFX_COUNT, buf.data(), buf.size()) == 0u);
+
+    // Confirm vs Back and Save vs Load must produce distinct waveforms
+    CHECK(confirmBuf != backBuf);
+    CHECK(saveBuf != loadBuf);
+
+    // 5) Polyphonic VoicePool: free selection, oldest-voice stealing, navigate debounce
+    Sound::VoicePool pool;
+    bool allFree[Sound::kVoiceCount] = { true, true, true, true };
+    bool stolen = false;
+
+    const int v0 = pool.Allocate(allFree, SFX_NAVIGATE, 100u, stolen);
+    CHECK(v0 == 0 && !stolen);
+
+    // Rapid navigate within 35ms debounce window is suppressed
+    CHECK(pool.ShouldSuppress(SFX_NAVIGATE, 120u));
+    CHECK(pool.Allocate(allFree, SFX_NAVIGATE, 120u, stolen) == -1);
+    // Non-navigate sound (e.g., confirm) is never suppressed by navigate debounce
+    CHECK(!pool.ShouldSuppress(SFX_CONFIRM, 120u));
+
+    allFree[0] = false;
+    const int v1 = pool.Allocate(allFree, SFX_CONFIRM, 120u, stolen);
+    CHECK(v1 == 1 && !stolen);
+
+    allFree[1] = false;
+    const int v2 = pool.Allocate(allFree, SFX_NAVIGATE, 140u, stolen); // 40ms later: allowed
+    CHECK(v2 == 2 && !stolen);
+
+    allFree[2] = false;
+    const int v3 = pool.Allocate(allFree, SFX_ADJUST, 150u, stolen);
+    CHECK(v3 == 3 && !stolen);
+
+    // All 4 voices busy -> steals oldest voice (voice 0), then next steals voice 1
+    allFree[3] = false;
+    const int s0 = pool.Allocate(allFree, SFX_SAVE_STATE, 160u, stolen);
+    CHECK(s0 == 0 && stolen);
+    const int s1 = pool.Allocate(allFree, SFX_LOAD_STATE, 170u, stolen);
+    CHECK(s1 == 1 && stolen);
+}
 }
 
 int main() {
@@ -391,6 +504,7 @@ int main() {
     test_ui_theme_and_touch();
     test_touch_controller();
     test_cover_scraper();
+    test_ui_sound();
     std::printf("CTR host tests passed (%d checks)\n", checks);
     return 0;
 }

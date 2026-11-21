@@ -11,7 +11,9 @@
 #include "UITouchInput.h"
 #include "TouchControllerCTR.h"
 #include "CoverScraperCTR.h"
+#include "UISound.h"
 #include "UserInterface.h"
+#include "SysCTR/HLEAudio/AudioOutput.h"
 
 #include <3ds.h>
 #include <citro3d.h>
@@ -243,6 +245,7 @@ void LoadFrontendConfig()
 	s_favCount = 0;
 	s_lastSelectedFile[0] = '\0';
 	SetThemeIndex(THEME_DARK);
+	Sound::SetVolume(SFX_VOL_MEDIUM);
 
 	FILE * f = fopen(kFrontendConfigPath, "r");
 	if (!f) return;
@@ -262,6 +265,12 @@ void LoadFrontendConfig()
 			if (v >= 0 && v < SORT_COUNT)
 				s_sortMode = v;
 		}
+		else if (!strncmp(line, "ui_sfx=", 7))
+		{
+			const int v = atoi(line + 7);
+			if (v >= 0 && v < SFX_VOL_COUNT)
+				Sound::SetVolume((ESfxVolume)v);
+		}
 		else if (!strncmp(line, "last=", 5))
 		{
 			CopyStr(s_lastSelectedFile, sizeof(s_lastSelectedFile), line + 5);
@@ -278,7 +287,8 @@ void SaveFrontendConfig()
 {
 	FILE * f = fopen(kFrontendConfigPath, "w");
 	if (!f) return;
-	fprintf(f, "theme=%d\nsort=%d\nlast=%s\n", GetThemeIndex(), s_sortMode, s_lastSelectedFile);
+	fprintf(f, "theme=%d\nsort=%d\nui_sfx=%d\nlast=%s\n",
+	        GetThemeIndex(), s_sortMode, (int)Sound::GetVolume(), s_lastSelectedFile);
 	for (int i = 0; i < s_romCount; ++i)
 	{
 		if (s_roms[i].favorite)
@@ -540,6 +550,7 @@ static const OptionEntry kOptions[] = {
 	{ "Show FPS",             "Enable frame rate measurement & perf log (console-wide).", true  },
 	{ "UI Theme",             "Switch between Dark, Light, Midnight, and Stealth themes.", true  },
 	{ "CPU Speed Hack",       "2x/3x scales DynaRec cycle counter for big FPS boosts.", true  },
+	{ "UI Sound FX",          "Frontend menu and touch HUD sound effects volume (console-wide).", true },
 };
 constexpr int kNumOptions = (int)(sizeof(kOptions) / sizeof(kOptions[0]));
 
@@ -675,44 +686,68 @@ void RunControlsPage(const char * gameName, const CRefPtr<CNativeTexture> & free
 			}
 		}
 
-		if (down & KEY_B) break;
+		if (down & KEY_B)
+		{
+			Sound::Play(SFX_BACK);
+			break;
+		}
 		if (down & KEY_Y)
 		{
 			ToggleLightDark();
 			SaveFrontendConfig();
+			Sound::Play(ActiveTheme().isLight ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF);
 		}
 		if (rep.Poll(down, held, KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN, 0))
+		{
 			sel = (sel + 1) % kCount;
+			Sound::Play(SFX_NAVIGATE, 0.98f);
+		}
 		if (rep.Poll(down, held, KEY_UP | KEY_DUP | KEY_CPAD_UP, 1))
+		{
 			sel = (sel + kCount - 1) % kCount;
+			Sound::Play(SFX_NAVIGATE, 1.04f);
+		}
 
 		const int dir = (down & (KEY_A | KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT | KEY_R)) ? 1 :
 		                (down & (KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT | KEY_L)) ? -1 : 0;
 		if (dir != 0)
 		{
+			const float stepPitch = (dir > 0) ? 1.06f : 0.94f;
 			switch (sel)
 			{
 			case 0:
 				cfg.layout = (ETouchPadLayout)(((int)cfg.layout + dir + TOUCH_LAYOUT_COUNT) % TOUCH_LAYOUT_COUNT);
+				Sound::Play(SFX_ADJUST, stepPitch);
 				break;
 			case 1:
 				cfg.leftHanded = !cfg.leftHanded;
+				Sound::Play(cfg.leftHanded ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF);
 				break;
 			case 2:
 				cfg.zToggleMode = !cfg.zToggleMode;
+				Sound::Play(cfg.zToggleMode ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF);
 				break;
 			case 3:
+			{
+				const float prevDz = cfg.stickDeadzone;
 				cfg.stickDeadzone += dir * 0.05f;
 				if (cfg.stickDeadzone < 0.15f) cfg.stickDeadzone = 0.15f;
 				if (cfg.stickDeadzone > 0.40f) cfg.stickDeadzone = 0.40f;
+				Sound::Play((fabsf(cfg.stickDeadzone - prevDz) > 0.001f) ? SFX_ADJUST : SFX_ERROR, stepPitch);
 				break;
+			}
 			case 4:
+			{
+				const float prevSens = cfg.stickSens;
 				cfg.stickSens += dir * 0.10f;
 				if (cfg.stickSens < 0.60f) cfg.stickSens = 0.60f;
 				if (cfg.stickSens > 1.60f) cfg.stickSens = 1.60f;
+				Sound::Play((fabsf(cfg.stickSens - prevSens) > 0.001f) ? SFX_ADJUST : SFX_ERROR, stepPitch);
 				break;
+			}
 			case 5:
 				cfg.invertY = !cfg.invertY;
+				Sound::Play(cfg.invertY ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF);
 				break;
 			}
 			TouchController::Engine().SetConfig(cfg);
@@ -841,9 +876,13 @@ bool Initialise()
 {
 	if (s_initialised) return true;
 	LoadFrontendConfig();
+	Sound::Init();
 	TouchController::Init();
 	if (!EnsureMenuPool())
+	{
+		Sound::Shutdown();
 		return false;
+	}
 	TickSystemStatus(true);
 	s_initialised = true;
 	return true;
@@ -853,6 +892,7 @@ void Shutdown()
 {
 	CoverScraper::Stop();
 	ReleasePreview();
+	Sound::Shutdown();
 	UI::Renderer::Shutdown();
 	s_romCount = 0;
 	s_viewCount = 0;
@@ -894,6 +934,7 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 
 	bool pending_fps = gGlobalPreferences.DisplayFramerate;
 	EViewportType pending_viewport = gGlobalPreferences.ViewportType;
+	ESfxVolume pending_sfx = Sound::GetVolume();
 	int   selection    = 0;
 	float hlPos        = 0.0f;
 	float hlVel        = 0.0f;
@@ -985,8 +1026,11 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 					const int idx = (int)floorf(scrollPos + ((float)touch.releaseY - kListY) / kRowStride);
 					if (idx >= 0 && idx < kNumOptions)
 					{
-						if (touch.releaseX >= 205 || idx == selection)
+						const bool activate = (touch.releaseX >= 205 || idx == selection);
+						if (activate)
 							down |= KEY_A;
+						else if (idx != selection)
+							Sound::Play(SFX_NAVIGATE, (idx < selection) ? 1.04f : 0.98f);
 						selection = idx;
 						manualScroll = false;
 					}
@@ -998,10 +1042,16 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 		{
 			ToggleLightDark();
 			SaveFrontendConfig();
+			Sound::Play(ActiveTheme().isLight ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF);
 		}
-		if (down & KEY_B) break;
+		if (down & KEY_B)
+		{
+			Sound::Play(SFX_BACK);
+			break;
+		}
 		if (down & KEY_START)
 		{
+			Sound::SetVolume(pending_sfx);
 			if (CPreferences::Get())
 			{
 				CPreferences::Get()->SetRomPreferences(romId, prefs);
@@ -1022,6 +1072,7 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 				gDynarecCycleMultiplier = (prefs.DynarecCycleMultiplier >= 3) ? 3u :
 					((prefs.DynarecCycleMultiplier == 2) ? 2u : 1u);
 			}
+			Sound::Play(SFX_CONFIRM);
 			break;
 		}
 
@@ -1029,11 +1080,13 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 		{
 			selection = (selection + 1) % kNumOptions;
 			manualScroll = false;
+			Sound::Play(SFX_NAVIGATE, 0.98f);
 		}
 		if (rep.Poll(down, held, KEY_UP | KEY_DUP | KEY_CPAD_UP, 1))
 		{
 			selection = (selection + kNumOptions - 1) % kNumOptions;
 			manualScroll = false;
+			Sound::Play(SFX_NAVIGATE, 1.04f);
 		}
 
 		if (manualScroll)
@@ -1063,37 +1116,50 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 		                (down & (KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT | KEY_L)) ? -1 : 0;
 		if (dir != 0)
 		{
+			const float stepPitch = (dir > 0) ? 1.06f : 0.94f;
 			switch (selection)
 			{
-			case 0:  prefs.DynarecEnabled = !prefs.DynarecEnabled; break;
-			case 1:  prefs.DynarecLoopOptimisation = !prefs.DynarecLoopOptimisation; break;
-			case 2:  prefs.DynarecDoublesOptimisation = !prefs.DynarecDoublesOptimisation; break;
-			case 3:  prefs.MemoryAccessOptimisation = !prefs.MemoryAccessOptimisation; break;
-			case 4:  prefs.PatchesEnabled = !prefs.PatchesEnabled; break;
-			case 5:  prefs.SpeedSyncEnabled = prefs.SpeedSyncEnabled ? 0u : 1u; break;
-			case 6:  prefs.DoubleDisplayEnabled = !prefs.DoubleDisplayEnabled; break;
-			case 7:  prefs.CleanSceneEnabled = !prefs.CleanSceneEnabled; break;
-			case 8:  prefs.ClearDepthFrameBuffer = !prefs.ClearDepthFrameBuffer; break;
-			case 9:  prefs.Frameskip = (EFrameskipValue)((prefs.Frameskip + dir + NUM_FRAMESKIP_VALUES) % NUM_FRAMESKIP_VALUES); break;
-			case 10: prefs.CheckTextureHashFrequency = (ETextureHashFrequency)((prefs.CheckTextureHashFrequency + dir + NUM_THF) % NUM_THF); break;
-			case 11: prefs.VideoRateMatch = !prefs.VideoRateMatch; break;
-			case 12: prefs.FogEnabled = !prefs.FogEnabled; break;
-			case 13: pending_viewport = (EViewportType)((pending_viewport + dir + 4) % 4); break;
+			case 0:  prefs.DynarecEnabled = !prefs.DynarecEnabled; Sound::Play(prefs.DynarecEnabled ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 1:  prefs.DynarecLoopOptimisation = !prefs.DynarecLoopOptimisation; Sound::Play(prefs.DynarecLoopOptimisation ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 2:  prefs.DynarecDoublesOptimisation = !prefs.DynarecDoublesOptimisation; Sound::Play(prefs.DynarecDoublesOptimisation ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 3:  prefs.MemoryAccessOptimisation = !prefs.MemoryAccessOptimisation; Sound::Play(prefs.MemoryAccessOptimisation ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 4:  prefs.PatchesEnabled = !prefs.PatchesEnabled; Sound::Play(prefs.PatchesEnabled ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 5:  prefs.SpeedSyncEnabled = prefs.SpeedSyncEnabled ? 0u : 1u; Sound::Play(prefs.SpeedSyncEnabled ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 6:  prefs.DoubleDisplayEnabled = !prefs.DoubleDisplayEnabled; Sound::Play(prefs.DoubleDisplayEnabled ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 7:  prefs.CleanSceneEnabled = !prefs.CleanSceneEnabled; Sound::Play(prefs.CleanSceneEnabled ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 8:  prefs.ClearDepthFrameBuffer = !prefs.ClearDepthFrameBuffer; Sound::Play(prefs.ClearDepthFrameBuffer ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 9:  prefs.Frameskip = (EFrameskipValue)((prefs.Frameskip + dir + NUM_FRAMESKIP_VALUES) % NUM_FRAMESKIP_VALUES); Sound::Play(SFX_ADJUST, stepPitch); break;
+			case 10: prefs.CheckTextureHashFrequency = (ETextureHashFrequency)((prefs.CheckTextureHashFrequency + dir + NUM_THF) % NUM_THF); Sound::Play(SFX_ADJUST, stepPitch); break;
+			case 11: prefs.VideoRateMatch = !prefs.VideoRateMatch; Sound::Play(prefs.VideoRateMatch ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 12: prefs.FogEnabled = !prefs.FogEnabled; Sound::Play(prefs.FogEnabled ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 13: pending_viewport = (EViewportType)((pending_viewport + dir + 4) % 4); Sound::Play(SFX_ADJUST, stepPitch); break;
 			case 14:
+			{
+				const float prevZoom = prefs.ZoomX;
 				prefs.ZoomX += dir * 0.1f;
 				if (prefs.ZoomX < 0.5f) prefs.ZoomX = 0.5f;
 				if (prefs.ZoomX > 2.0f) prefs.ZoomX = 2.0f;
+				Sound::Play((fabsf(prefs.ZoomX - prevZoom) > 0.001f) ? SFX_ADJUST : SFX_ERROR, stepPitch);
 				break;
-			case 15: prefs.AudioEnabled = (EAudioPluginMode)((prefs.AudioEnabled + dir + 3) % 3); break;
-			case 16: prefs.AudioRateMatch = !prefs.AudioRateMatch; break;
-			case 17: prefs.CheatsEnabled = !prefs.CheatsEnabled; break;
-			case 18: pending_fps = !pending_fps; break;
-			case 19: CycleTheme(dir); break;
+			}
+			case 15: prefs.AudioEnabled = (EAudioPluginMode)((prefs.AudioEnabled + dir + 3) % 3); Sound::Play(SFX_ADJUST, stepPitch); break;
+			case 16: prefs.AudioRateMatch = !prefs.AudioRateMatch; Sound::Play(prefs.AudioRateMatch ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 17: prefs.CheatsEnabled = !prefs.CheatsEnabled; Sound::Play(prefs.CheatsEnabled ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 18: pending_fps = !pending_fps; Sound::Play(pending_fps ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF); break;
+			case 19: CycleTheme(dir); Sound::Play(SFX_ADJUST, stepPitch); break;
 			case 20:
 			{
 				int cur = (prefs.DynarecCycleMultiplier >= 3) ? 3 : ((prefs.DynarecCycleMultiplier == 2) ? 2 : 1);
 				cur = ((cur - 1 + dir + 3) % 3) + 1;
 				prefs.DynarecCycleMultiplier = (u32)cur;
+				Sound::Play(SFX_ADJUST, stepPitch);
+				break;
+			}
+			case 21:
+			{
+				pending_sfx = (ESfxVolume)(((int)pending_sfx + dir + SFX_VOL_COUNT) % SFX_VOL_COUNT);
+				if (pending_sfx != SFX_VOL_OFF)
+					Sound::PlayPreview(SFX_CONFIRM, pending_sfx);
 				break;
 			}
 			}
@@ -1156,6 +1222,7 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 			case 20: snprintf(value, sizeof(value),
 				prefs.DynarecCycleMultiplier >= 3 ? "3x Turbo" :
 				(prefs.DynarecCycleMultiplier == 2 ? "2x Fast" : "1x Normal")); break;
+			case 21: snprintf(value, sizeof(value), "%s", Sound::VolumeName(pending_sfx)); break;
 			}
 
 			if (isBool)
@@ -1278,6 +1345,13 @@ std::string RunRomSelector()
 			CoverScraper::Start(jobs);
 	}
 
+	static bool s_playedStartupSfx = false;
+	if (!s_playedStartupSfx)
+	{
+		s_playedStartupSfx = true;
+		Sound::Play(SFX_STARTUP);
+	}
+
 	while (aptMainLoop() && !shouldQuit)
 	{
 		hidScanInput();
@@ -1368,6 +1442,8 @@ std::string RunRomSelector()
 
 		if (down & KEY_START)
 		{
+			Sound::Play(SFX_BACK);
+			svcSleepThread(90000000LL);
 			shouldQuit = true;
 			break;
 		}
@@ -1376,6 +1452,7 @@ std::string RunRomSelector()
 		{
 			ToggleLightDark();
 			SaveFrontendConfig();
+			Sound::Play(ActiveTheme().isLight ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF);
 			snprintf(toast, sizeof(toast), "Theme: %s", ActiveTheme().name);
 			toastFrames = 70;
 		}
@@ -1384,14 +1461,18 @@ std::string RunRomSelector()
 		{
 			s_sortMode = (s_sortMode + ((down & KEY_R) ? 1 : (SORT_COUNT - 1))) % SORT_COUNT;
 			RebuildView();
+			prevSelected = s_selected;
 			SaveFrontendConfig();
 			manualScroll = false;
+			Sound::Play(SFX_ADJUST, (down & KEY_R) ? 1.06f : 0.94f);
 			snprintf(toast, sizeof(toast), "Sort: %s", kSortNames[s_sortMode]);
 			toastFrames = 70;
 		}
 
 		if (s_viewCount > 0)
 		{
+			bool navPageJump = false;
+			bool navUp       = false;
 			if (rep.Poll(down, held, KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN, 0))
 			{
 				s_selected = (s_selected + 1) % s_viewCount;
@@ -1401,18 +1482,22 @@ std::string RunRomSelector()
 			{
 				s_selected = (s_selected + s_viewCount - 1) % s_viewCount;
 				manualScroll = false;
+				navUp = true;
 			}
 			if (rep.Poll(down, held, KEY_RIGHT | KEY_DRIGHT, 2))
 			{
 				s_selected += kRowsVisible;
 				if (s_selected >= s_viewCount) s_selected = s_viewCount - 1;
 				manualScroll = false;
+				navPageJump = true;
 			}
 			if (rep.Poll(down, held, KEY_LEFT | KEY_DLEFT, 3))
 			{
 				s_selected -= kRowsVisible;
 				if (s_selected < 0) s_selected = 0;
 				manualScroll = false;
+				navPageJump = true;
+				navUp = true;
 			}
 
 			if (down & KEY_SELECT)
@@ -1420,10 +1505,14 @@ std::string RunRomSelector()
 				FrontendRomInfo & cur = s_roms[s_viewOrder[s_selected]];
 				cur.favorite = !cur.favorite;
 				SaveFrontendConfig();
+				Sound::Play(cur.favorite ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF);
 				snprintf(toast, sizeof(toast), cur.favorite ? "Added to favorites" : "Removed from favorites");
 				toastFrames = 70;
 				if (s_sortMode == SORT_FAV)
+				{
 					RebuildView();
+					prevSelected = s_selected;
+				}
 			}
 
 			if (down & KEY_X)
@@ -1431,14 +1520,21 @@ std::string RunRomSelector()
 				const FrontendRomInfo & cur = s_roms[s_viewOrder[s_selected]];
 				if (cur.hasDetails)
 				{
+					Sound::Play(SFX_CONFIRM);
 					RunOptionsPage(cur.romId, false);
 					RefreshMemorySummary();
 					touch.Reset();
+				}
+				else
+				{
+					Sound::Play(SFX_ERROR);
 				}
 			}
 
 			if (s_selected != prevSelected)
 			{
+				const bool movedUp = navUp || (s_selected < prevSelected);
+				Sound::Play(navPageJump ? SFX_ADJUST : SFX_NAVIGATE, movedUp ? 1.04f : 0.98f);
 				prevSelected = s_selected;
 				infoAnim = 0.0f;
 				IO::Filename selPath;
@@ -1446,6 +1542,10 @@ std::string RunRomSelector()
 				CoverScraper::Prioritize(selPath);
 			}
 			RequestPreviewForRom(s_viewOrder[s_selected], false);
+		}
+		else if (down & (KEY_A | KEY_X))
+		{
+			Sound::Play(SFX_ERROR);
 		}
 
 		// Reload cover automatically as soon as the background scraper saves a new PNG!
@@ -1667,6 +1767,7 @@ std::string RunRomSelector()
 
 		if (launch)
 		{
+			Sound::Play(SFX_LAUNCH_GAME);
 			CoverScraper::Stop();
 			const FrontendRomInfo & chosen = s_roms[s_viewOrder[s_selected]];
 			CopyStr(s_lastSelectedFile, sizeof(s_lastSelectedFile), chosen.filename);
@@ -1690,6 +1791,9 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 		UI::RestoreRenderState();
 		return;
 	}
+
+	AudioOutput::SetGamePaused(true);
+	Sound::Play(SFX_PAUSE_OPEN);
 
 	constexpr int kNumCells = 10;
 	static const Rect kCells[kNumCells] = {
@@ -1799,6 +1903,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 							const float mid = kCells[3].x + kCells[3].w * 0.5f;
 							slot = (touch.releaseX < (int)mid) ? ((slot + 4) % 5) : ((slot + 1) % 5);
 							TouchController::SetActiveSlot(slot);
+							Sound::Play(SFX_ADJUST, 0.90f + slot * 0.05f, 0.22f);
 						}
 						else
 						{
@@ -1812,6 +1917,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 
 		if (down & (KEY_B | KEY_SELECT))
 		{
+			Sound::Play(SFX_PAUSE_CLOSE);
 			exitMenu = true;
 			break;
 		}
@@ -1819,40 +1925,71 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 		{
 			ToggleLightDark();
 			SaveFrontendConfig();
+			Sound::Play(ActiveTheme().isLight ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF);
 		}
-		if (down & KEY_L) { slot = (slot + 4) % 5; TouchController::SetActiveSlot(slot); }
-		if (down & KEY_R) { slot = (slot + 1) % 5; TouchController::SetActiveSlot(slot); }
+		if (down & KEY_L)
+		{
+			slot = (slot + 4) % 5;
+			TouchController::SetActiveSlot(slot);
+			Sound::Play(SFX_ADJUST, 0.90f + slot * 0.05f, -0.15f);
+		}
+		if (down & KEY_R)
+		{
+			slot = (slot + 1) % 5;
+			TouchController::SetActiveSlot(slot);
+			Sound::Play(SFX_ADJUST, 0.90f + slot * 0.05f, 0.15f);
+		}
+
+		auto CellPan = [](int cell) -> float {
+			if (cell <= 0) return 0.0f;
+			const int col = (cell - 1) % 3;
+			return (col == 0) ? -0.22f : ((col == 2) ? 0.22f : 0.0f);
+		};
 
 		if (rep.Poll(down, held, KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN, 0))
 		{
 			if (selection == 0) selection = 1;
 			else if (selection <= 6) selection += 3;
 			else selection = 0;
+			Sound::Play(SFX_NAVIGATE, 0.98f, CellPan(selection));
 		}
 		if (rep.Poll(down, held, KEY_UP | KEY_DUP | KEY_CPAD_UP, 1))
 		{
 			if (selection == 0) selection = 7;
 			else if (selection <= 3) selection = 0;
 			else selection -= 3;
+			Sound::Play(SFX_NAVIGATE, 1.04f, CellPan(selection));
 		}
 		if (rep.Poll(down, held, KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT, 2))
 		{
-			if (selection == 3) { slot = (slot + 1) % 5; TouchController::SetActiveSlot(slot); }
+			if (selection == 3)
+			{
+				slot = (slot + 1) % 5;
+				TouchController::SetActiveSlot(slot);
+				Sound::Play(SFX_ADJUST, 0.90f + slot * 0.05f, 0.22f);
+			}
 			else if (selection > 0)
 			{
 				const int rowBase = 1 + ((selection - 1) / 3) * 3;
 				const int col = (selection - 1) % 3;
 				selection = rowBase + ((col + 1) % 3);
+				Sound::Play(SFX_NAVIGATE, 1.02f, CellPan(selection));
 			}
 		}
 		if (rep.Poll(down, held, KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT, 3))
 		{
-			if (selection == 3) { slot = (slot + 4) % 5; TouchController::SetActiveSlot(slot); }
+			if (selection == 3)
+			{
+				slot = (slot + 4) % 5;
+				TouchController::SetActiveSlot(slot);
+				Sound::Play(SFX_ADJUST, 0.90f + slot * 0.05f, 0.22f);
+			}
 			else if (selection > 0)
 			{
 				const int rowBase = 1 + ((selection - 1) / 3) * 3;
 				const int col = (selection - 1) % 3;
 				selection = rowBase + ((col + 2) % 3);
+				Sound::Play(SFX_NAVIGATE, 0.98f, CellPan(selection));
 			}
 		}
 
@@ -1863,19 +2000,25 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 			         DAEDALUS_CTR_PATH("SaveStates/"), gameName ? gameName : "rom", slot);
 			switch (selection)
 			{
-			case 0: exitMenu = true; break;
+			case 0:
+				Sound::Play(SFX_PAUSE_CLOSE);
+				exitMenu = true;
+				break;
 			case 1:
+				Sound::Play(SFX_SAVE_STATE);
 				CPU_RequestSaveState(path);
 				exitMenu = true;
 				break;
 			case 2:
 				if (slotExists[slot])
 				{
+					Sound::Play(SFX_LOAD_STATE);
 					CPU_RequestLoadState(path);
 					exitMenu = true;
 				}
 				else
 				{
+					Sound::Play(SFX_ERROR);
 					snprintf(toast, sizeof(toast), "Slot %d is empty", slot);
 					toastFrames = 75;
 				}
@@ -1883,6 +2026,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 			case 3:
 				slot = (slot + 1) % 5;
 				TouchController::SetActiveSlot(slot);
+				Sound::Play(SFX_ADJUST, 0.90f + slot * 0.05f, 0.22f);
 				break;
 			case 4:
 			{
@@ -1896,31 +2040,38 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 					CPreferences::Get()->SetRomPreferences(romId, p);
 					CPreferences::Get()->Commit();
 				}
+				Sound::Play((nextAud == APM_DISABLED) ? SFX_TOGGLE_OFF : SFX_TOGGLE_ON);
 				snprintf(toast, sizeof(toast), "Audio: %s", AudioName(nextAud));
 				toastFrames = 75;
 				break;
 			}
 			case 5:
+				Sound::Play(SFX_CONFIRM);
 				RunOptionsPage(romId, true);
 				RefreshSlots();
 				RefreshMemorySummary();
 				touch.Reset();
 				break;
 			case 6:
+				Sound::Play(SFX_CONFIRM);
 				RunControlsPage(gameName, freezeSnap);
 				touch.Reset();
 				break;
 			case 7:
+				Sound::Play(SFX_LAUNCH_GAME);
 				s_resetRequested = true;
 				CPU_Halt("Reset from menu");
 				exitMenu = true;
 				break;
 			case 8:
+				Sound::Play(SFX_BACK);
 				s_resetRequested = false;
 				CPU_Halt("Closed from menu");
 				exitMenu = true;
 				break;
 			case 9:
+				Sound::Play(SFX_BACK);
+				svcSleepThread(90000000LL);
 				s_resetRequested = false;
 				shouldQuit = true;
 				CPU_Halt("Exit from menu");
@@ -2069,6 +2220,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 	freezeSnap = nullptr;
 	ReleaseAssets();
 	UI::RestoreRenderState();
+	AudioOutput::SetGamePaused(false);
 }
 
 } // namespace FrontendCTR

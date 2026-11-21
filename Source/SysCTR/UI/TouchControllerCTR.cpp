@@ -10,6 +10,7 @@
 #include "UITheme.h"
 #include "UIAtlas.h"
 #include "UIRenderer.h"
+#include "UISound.h"
 #include "Config/ConfigOptions.h"
 #include "Core/CPU.h"
 #include "SysCTR/HLEGraphics/RendererCTR.h"
@@ -762,19 +763,39 @@ void PollInput(uint32_t keysHeld, TouchPadOutput & out)
 		py = tp.py;
 	}
 
+	const ETouchPadLayout prevLayout = s_engine.GetConfig().layout;
+	const bool prevZLatched = s_engine.IsZLatched();
+
 	s_engine.Update(touchHeld, px, py, out);
+
+	const ETouchPadLayout curLayout = s_engine.GetConfig().layout;
+	if (curLayout != prevLayout)
+	{
+		if (curLayout == TOUCH_LAYOUT_SLEEP)
+			Sound::Play(SFX_TOGGLE_OFF);
+		else if (prevLayout == TOUCH_LAYOUT_SLEEP)
+			Sound::Play(SFX_TOGGLE_ON);
+		else
+			Sound::Play(SFX_ADJUST, 1.04f);
+	}
+	if (s_engine.IsZLatched() != prevZLatched)
+	{
+		Sound::Play(s_engine.IsZLatched() ? SFX_TOGGLE_ON : SFX_TOGGLE_OFF);
+	}
 
 	if (out.requestMuteToggle)
 	{
 		if (gAudioPluginEnabled == APM_DISABLED)
 		{
 			gAudioPluginEnabled = (s_savedAudioMode != APM_DISABLED) ? s_savedAudioMode : APM_ENABLED_ASYNC;
+			Sound::Play(SFX_TOGGLE_ON);
 			ShowToast("Audio On", 60);
 		}
 		else
 		{
 			s_savedAudioMode = gAudioPluginEnabled;
 			gAudioPluginEnabled = APM_DISABLED;
+			Sound::Play(SFX_TOGGLE_OFF);
 			ShowToast("Audio Muted", 60);
 		}
 	}
@@ -785,6 +806,7 @@ void PollInput(uint32_t keysHeld, TouchPadOutput & out)
 		snprintf(path, sizeof(path), "%s%s.ss%d",
 		         DAEDALUS_CTR_PATH("SaveStates/"), s_gameName, s_activeSlot);
 		CPU_RequestSaveState(path);
+		Sound::Play(SFX_SAVE_STATE);
 		char msg[48];
 		snprintf(msg, sizeof(msg), "Saved to Slot %d", s_activeSlot);
 		ShowToast(msg, 90);
@@ -798,12 +820,14 @@ void PollInput(uint32_t keysHeld, TouchPadOutput & out)
 		if (IO::File::Exists(path))
 		{
 			CPU_RequestLoadState(path);
+			Sound::Play(SFX_LOAD_STATE);
 			char msg[48];
 			snprintf(msg, sizeof(msg), "Loaded Slot %d", s_activeSlot);
 			ShowToast(msg, 90);
 		}
 		else
 		{
+			Sound::Play(SFX_ERROR);
 			char msg[48];
 			snprintf(msg, sizeof(msg), "Slot %d is empty", s_activeSlot);
 			ShowToast(msg, 75);

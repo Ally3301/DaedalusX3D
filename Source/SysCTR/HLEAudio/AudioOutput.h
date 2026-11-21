@@ -41,6 +41,11 @@ class AudioOutput
 		void				StartAudio( );						// Starts the Audio PlayBack (as if unpaused)
 		bool				IsPlaying() const { return mAudioPlaying; }
 
+		// Shared NDSP hardware lifecycle (channel 0 = N64 game audio, channels 1..4 = UI SFX)
+		static bool			AcquireNdsp();
+		static void			ReleaseNdsp();
+		static void			SetGamePaused( bool paused );
+
 	public:
 		void				FillBuffer( Sample * buffer, u32 num_samples );
 
