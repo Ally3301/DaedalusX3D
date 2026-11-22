@@ -685,7 +685,37 @@ bool CompileMux(u64 mux, bool two_cycles, SPicaTevProgram & out)
 	out.numStages = static_cast<u8>(totalStages);
 	out.usesTex0  = c0Rgb.usesTex0 || c0Alpha.usesTex0 || c1Rgb.usesTex0 || c1Alpha.usesTex0;
 	out.usesTex1  = c0Rgb.usesTex1 || c0Alpha.usesTex1 || c1Rgb.usesTex1 || c1Alpha.usesTex1;
-	out.valid     = true;
+	u8 cMask = 0;
+	u8 sMask = 0;
+	for (int s = 0; s < totalStages; ++s)
+	{
+		const EPicaConstSrc cs[2] = { out.stages[s].constRgb, out.stages[s].constAlpha };
+		for (int k = 0; k < 2; ++k)
+		{
+			switch (cs[k])
+			{
+			case PICA_CONST_PRIM_RGB:
+			case PICA_CONST_PRIM_ALPHA:
+				cMask |= 1u;
+				sMask |= static_cast<u8>(1u << s);
+				break;
+			case PICA_CONST_ENV_RGB:
+			case PICA_CONST_ENV_ALPHA:
+				cMask |= 2u;
+				sMask |= static_cast<u8>(1u << s);
+				break;
+			case PICA_CONST_PRIM_LOD:
+				cMask |= 4u;
+				sMask |= static_cast<u8>(1u << s);
+				break;
+			default:
+				break;
+			}
+		}
+	}
+	out.constUsedMask         = cMask;
+	out.dynamicConstStageMask = sMask;
+	out.valid                 = true;
 	return true;
 }
 
@@ -719,6 +749,22 @@ void ApplyProgram(const SPicaTevProgram & prog, u32 primABGR, u32 envABGR, u8 pr
 	sPrevActiveStages = n;
 	C3D_TexEnvBufUpdate(C3D_RGB,   prog.bufWriteRgbMask);
 	C3D_TexEnvBufUpdate(C3D_Alpha, prog.bufWriteAlphaMask);
+}
+
+void UpdateProgramColors(const SPicaTevProgram & prog, u32 primABGR, u32 envABGR, u8 primLodU8)
+{
+	u8 mask = prog.dynamicConstStageMask;
+	if (mask == 0)
+		return;
+	Citro3D::FlushPendingBatch();
+	for (int s = 0; mask != 0; ++s, mask >>= 1)
+	{
+		if (mask & 1u)
+		{
+			const SPicaTevStage & st = prog.stages[s];
+			C3D_TexEnvColor(C3D_GetTexEnv(s), ResolveStageColor(st.constRgb, st.constAlpha, primABGR, envABGR, primLodU8));
+		}
+	}
 }
 
 } // namespace PicaTEV

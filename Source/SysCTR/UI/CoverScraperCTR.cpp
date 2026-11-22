@@ -12,6 +12,7 @@
 #include <atomic>
 #include <png.h>
 #include "Utility/IO.h"
+extern bool shouldQuit;
 #endif
 
 namespace UI
@@ -610,8 +611,12 @@ void Stop()
 	s_stopReq.store(true, std::memory_order_release);
 	if (s_thread != nullptr)
 	{
-		threadJoin(s_thread, U64_MAX);
-		threadFree(s_thread);
+		// Avoid hanging HOME -> Close exit if an HTTP socket is mid-timeout.
+		const u64 timeoutNs = ::shouldQuit ? 1000000000ULL : U64_MAX;
+		if (R_SUCCEEDED(threadJoin(s_thread, timeoutNs)))
+		{
+			threadFree(s_thread);
+		}
 		s_thread = nullptr;
 	}
 	if (s_lockInit)

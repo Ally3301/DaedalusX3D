@@ -102,6 +102,13 @@ static const EArmReg gRegistersToUseForCaching[] = {
 };
 
 extern "C" { void _DirectExitCheckCheckCount(); void _DynaRec_DIV(); void _DynaRec_DIVU(); }
+extern "C" {
+	void _ReadFastPRead_u8();
+	void _ReadFastPRead_s8();
+	void _ReadFastPRead_u16();
+	void _ReadFastPRead_s16();
+	void _ReadFastPRead_u32();
+}
 static_assert(__builtin_offsetof(SCPUState, MultLo) == 0x290, "DynarecStubARM.S _MultLo offset mismatch");
 static_assert(__builtin_offsetof(SCPUState, MultHi) == 0x298, "DynarecStubARM.S _MultHi offset mismatch");
 
@@ -236,6 +243,55 @@ void Dynarec_SetCPUStuffToDo(){}
 //*****************************************************************************
 //
 //*****************************************************************************
+static inline u32 GetRdramSafeLimit()
+{
+	if (gRamSize == 0x800000u) return 0x007F0000u;
+	if (gRamSize == 0x400000u) return 0x003FC000u;
+	return 0u;
+}
+
+static inline bool OpPreservesR0HostBase(OpCode op_code)
+{
+	if (op_code._u32 == 0)
+		return true;
+	switch (op_code.op)
+	{
+		case OP_LW:
+		case OP_SW:
+		case OP_LWC1:
+		case OP_SWC1:
+		case OP_LDC1:
+		case OP_SDC1:
+			return true;
+		case OP_COPRO1:
+			if (op_code.cop1_op == Cop1Op_SInstr)
+			{
+				switch (op_code.cop1_funct)
+				{
+					case Cop1OpFunc_ADD:
+					case Cop1OpFunc_SUB:
+					case Cop1OpFunc_MUL:
+					case Cop1OpFunc_DIV:
+					case Cop1OpFunc_SQRT:
+					case Cop1OpFunc_ABS:
+					case Cop1OpFunc_MOV:
+					case Cop1OpFunc_NEG:
+					case Cop1OpFunc_TRUNC_W:
+					case Cop1OpFunc_ROUND_W:
+					case Cop1OpFunc_CVT_W:
+						return true;
+				}
+			}
+			else if (op_code.cop1_op == Cop1Op_WInstr && op_code.cop1_funct == Cop1OpFunc_CVT_S)
+			{
+				return true;
+			}
+			return false;
+		default:
+			return false;
+	}
+}
+
 CCodeGeneratorARM::CCodeGeneratorARM( CAssemblyBuffer * p_primary, CAssemblyBuffer * p_secondary )
 :	CCodeGenerator( )
 ,	CAssemblyWriterARM( p_primary, p_secondary )
@@ -245,6 +301,8 @@ CCodeGeneratorARM::CCodeGeneratorARM( CAssemblyBuffer * p_primary, CAssemblyBuff
 ,	mpSecondary( p_secondary )
 ,	mLoopTop( nullptr )
 ,	mUseFixedRegisterAllocation( false )
+,	mVerifiedRdramMask( 0 )
+,	mR0HostBase( N64Reg_R0 )
 {
 }
 
@@ -299,6 +357,7 @@ void CCodeGeneratorARM::Initialise( u32 entry_address, u32 exit_address, u32 * h
 	}
 
 	// p_base/span_list ignored for now
+	InvalidateBaseTracking();
 	SetRegisterSpanList(register_usage, entry_address == exit_address);
 }
 
@@ -371,6 +430,7 @@ void	CCodeGeneratorARM::SetRegisterSpanList(const SRegisterUsageInfo& register_u
 			}
 			++i;
 		}
+		InvalidateBaseTracking();
 		mLoopTop = GetAssemblyBuffer()->GetLabel();
 	} //End of Loop optimization code
 }
@@ -739,6 +799,9 @@ void	CCodeGeneratorARM::FlushAllRegisters(CN64RegisterCacheARM& cache, bool inva
 {
 	mFloatCMPIsValid = false;	//invalidate float compare register
 	mMultIsValid = false;	//Mult hi/lo are invalid
+	mR0HostBase = N64Reg_R0;
+	if (invalidate && !IsBufferB())
+		mVerifiedRdramMask = 0;
 
 	// Skip r0; flush hi before lo so lazy sign-extension reads live cached lo regs.
 	for (u32 i = 1; i < NUM_N64_REGS; i++)
@@ -812,6 +875,12 @@ void	CCodeGeneratorARM::RestoreAllRegisters(CN64RegisterCacheARM& current_cache,
 
 void CCodeGeneratorARM::StoreRegister(EN64Reg n64_reg, u32 lo_hi_idx, EArmReg arm_reg)
 {
+	if (lo_hi_idx == 0)
+	{
+		mVerifiedRdramMask &= ~(1u << n64_reg);
+		if (mR0HostBase == n64_reg)
+			mR0HostBase = N64Reg_R0;
+	}
 	if (lo_hi_idx == 0 && mRegisterCache.IsHiSignExtended(n64_reg))
 	{
 		// A caller is modifying lo without replacing hi via UpdateRegister (e.g. ORI/XORI/OR):
@@ -891,6 +960,12 @@ inline void CCodeGeneratorARM::SetRegister32s(EN64Reg n64_reg, s32 value)
 
 inline void CCodeGeneratorARM::SetRegister(EN64Reg n64_reg, u32 lo_hi_idx, u32 value)
 {
+	if (lo_hi_idx == 0)
+	{
+		mVerifiedRdramMask &= ~(1u << n64_reg);
+		if (mR0HostBase == n64_reg)
+			mR0HostBase = N64Reg_R0;
+	}
 	if (lo_hi_idx == 0 && mRegisterCache.IsHiSignExtended(n64_reg))
 	{
 		FlushRegister(mRegisterCache, n64_reg, 1, false);
@@ -1083,21 +1158,18 @@ CJumpLocation CCodeGeneratorARM::GenerateExitCode( u32 exit_address, u32 jump_ad
 	const u32 cycle_mult = (gDynarecCycleMultiplier >= 3) ? 3u : ((gDynarecCycleMultiplier == 2) ? 2u : 1u);
 	const u32 scaled_ops = num_instructions * cycle_mult;
 
-	if( (exit_address == mEntryAddress) & mLoopTop.IsSet() )
+	if( exit_address == mEntryAddress && mLoopTop.IsSet() && !IsBufferB() && jump_address == 0 )
 	{
 		#ifdef DAEDALUS_ENABLE_ASSERTS
 		DAEDALUS_ASSERT( mUseFixedRegisterAllocation, "Have mLoopTop but unfixed register allocation?" );
 		#endif
 		FlushAllFloatingPointRegisters( mRegisterCache, false );
 
-		// Check if we're ok to continue, without flushing any registers
-		GetVar( ArmReg_R0, &gCPUState.CPUControl[C0_COUNT]._u32 );
-		GetVar( ArmReg_R1, (const u32*)&gCPUState.Events[0].mCount );
-
 		//
-		//	Pull in any registers which may have been flushed for whatever reason,
-		//	and materialize any lazily sign-extended hi words once at loop back-edge
-		//	so side-exits on the next iteration see exact 64-bit register state.
+		//	Synchronize all register state before branching back to mLoopTop:
+		//	- Materialize any lazily sign-extended hi words.
+		//	- Flush any dirty uncached registers (e.g. KnownValue constants) so stores aren't lost.
+		//	- Reload any cached registers invalidated inside the loop (e.g. after CALL or SetRegister).
 		//
 		// Skip r0
 		for( u32 i {1}; i < NUM_N64_REGS; i++ )
@@ -1108,9 +1180,21 @@ CJumpLocation CCodeGeneratorARM::GenerateExitCode( u32 exit_address, u32 jump_ad
 			{
 				FlushRegister( mRegisterCache, n64_reg, 1, false );
 			}
+			if( !mRegisterCache.IsCached( n64_reg, 0 ) && mRegisterCache.IsDirty( n64_reg, 0 ) )
+			{
+				FlushRegister( mRegisterCache, n64_reg, 0, false );
+			}
+			if( !mRegisterCache.IsCached( n64_reg, 1 ) && mRegisterCache.IsDirty( n64_reg, 1 ) )
+			{
+				FlushRegister( mRegisterCache, n64_reg, 1, false );
+			}
 			PrepareCachedRegister( n64_reg, 0 );
 			PrepareCachedRegister( n64_reg, 1 );
 		}
+
+		// Check if we're ok to continue, without flushing any cached registers
+		GetVar( ArmReg_R0, &gCPUState.CPUControl[C0_COUNT]._u32 );
+		GetVar( ArmReg_R1, (const u32*)&gCPUState.Events[0].mCount );
 
 		// Assuming we don't need to set CurrentPC/Delay flags before we branch to the top..
 		//
@@ -1120,9 +1204,17 @@ CJumpLocation CCodeGeneratorARM::GenerateExitCode( u32 exit_address, u32 jump_ad
 		//
 		//	If the event counter is still positive, just jump directly to the top of our loop
 		//
-		SUB_IMM( ArmReg_R1, ArmReg_R1, s16(scaled_ops), ArmReg_R2 );
-		SetVar( (u32*)&gCPUState.Events[0].mCount, ArmReg_R1 );
-		CMP_IMM(ArmReg_R1, 0);
+		if (scaled_ops <= 255u)
+		{
+			SUBS_IMM( ArmReg_R1, ArmReg_R1, static_cast<u8>(scaled_ops) );
+			SetVar( (u32*)&gCPUState.Events[0].mCount, ArmReg_R1 );
+		}
+		else
+		{
+			SUB_IMM( ArmReg_R1, ArmReg_R1, scaled_ops, ArmReg_R2 );
+			SetVar( (u32*)&gCPUState.Events[0].mCount, ArmReg_R1 );
+			CMP_IMM( ArmReg_R1, 0 );
+		}
 		BX_IMM( mLoopTop, GT );
 
 		FlushAllRegisters( mRegisterCache, true );
@@ -1150,9 +1242,17 @@ CJumpLocation CCodeGeneratorARM::GenerateExitCode( u32 exit_address, u32 jump_ad
 		GetVar( ArmReg_R1, (const u32*)&gCPUState.Events[0].mCount );
 		ADD_IMM( ArmReg_R0, ArmReg_R0, scaled_ops, ArmReg_R2 );
 		SetVar( &gCPUState.CPUControl[C0_COUNT]._u32, ArmReg_R0 );
-		SUB_IMM( ArmReg_R1, ArmReg_R1, scaled_ops, ArmReg_R2 );
-		SetVar( (u32*)&gCPUState.Events[0].mCount, ArmReg_R1 );
-		CMP_IMM( ArmReg_R1, 0 );
+		if (scaled_ops <= 255u)
+		{
+			SUBS_IMM( ArmReg_R1, ArmReg_R1, static_cast<u8>(scaled_ops) );
+			SetVar( (u32*)&gCPUState.Events[0].mCount, ArmReg_R1 );
+		}
+		else
+		{
+			SUB_IMM( ArmReg_R1, ArmReg_R1, scaled_ops, ArmReg_R2 );
+			SetVar( (u32*)&gCPUState.Events[0].mCount, ArmReg_R1 );
+			CMP_IMM( ArmReg_R1, 0 );
+		}
 		CJumpLocation event_jump = BX_IMM( CCodeLabel(nullptr), LE );
 
 		CCodeLabel next_jump_label( GetAssemblyBuffer()->GetLabel() );
@@ -1391,9 +1491,15 @@ CJumpLocation	CCodeGeneratorARM::GenerateOpCode( const STraceEntry& ti, bool bra
 	{
 		if( branch_delay_slot )
 		{
+			mR0HostBase = N64Reg_R0;
 			SetVar(&gCPUState.Delay, NO_DELAY);
 		}
 		return CJumpLocation( NULL);
+	}
+
+	if( branch_delay_slot || IsBufferB() || !OpPreservesR0HostBase(op_code) )
+	{
+		mR0HostBase = N64Reg_R0;
 	}
 
 	if( branch_delay_slot )
@@ -1738,6 +1844,7 @@ CJumpLocation	CCodeGeneratorARM::GenerateOpCode( const STraceEntry& ti, bool bra
 
 void	CCodeGeneratorARM::GenerateBranchHandler( CJumpLocation branch_handler_jump, RegisterSnapshotHandle snapshot )
 {
+	InvalidateBaseTracking();
 	InsertLiteralPool(false);
 	PatchJumpLong( branch_handler_jump, GetAssemblyBuffer()->GetLabel() );
 	mRegisterCache = GetRegisterCacheFromHandle(snapshot);
@@ -1930,9 +2037,26 @@ inline void CCodeGeneratorARM::GenerateLoad( u32 current_pc, EArmReg arm_dest, E
 			}
 			return;
 		}
+		const MemFuncRead & m = g_MemoryLookupTableRead[eff_addr >> 18];
+		if (m.pRead != nullptr)
+		{
+			const u32 host_addr = reinterpret_cast<u32>(m.pRead) + (eff_addr ^ twiddle);
+			MOV32(ArmReg_R0, host_addr);
+			switch(bits)
+			{
+				case 32:	LDR(arm_dest, ArmReg_R0, 0); break;
+				case 16:	if(is_signed)	{ LDRSH(arm_dest, ArmReg_R0, 0); }
+							else			{ LDRH(arm_dest, ArmReg_R0, 0); } break;
+				case 8:		if(is_signed)	{ LDRSB(arm_dest, ArmReg_R0, 0); }
+							else			{ LDRB(arm_dest, ArmReg_R0, 0); } break;
+			}
+			return;
+		}
 	}
 
-	if ((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad))
+	if ((gDynarecStackOptimisation && base == N64Reg_SP) ||
+		(gMemoryAccessOptimisation && mQuickLoad) ||
+		(!IsBufferB() && (mVerifiedRdramMask & (1u << base)) != 0 && offset >= 0 && offset <= 4090))
 	{
 		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
 		if (bits == 32 && twiddle == 0 && offset != 0 && offset >= -4095 && offset <= 4095)
@@ -2011,10 +2135,42 @@ inline void CCodeGeneratorARM::GenerateLoad( u32 current_pc, EArmReg arm_dest, E
 
 		PatchJumpLong( loc, GetAssemblyBuffer()->GetLabel() );
 
+		// Zero-flush fast pRead path for 0x7F/0x70 (GoldenEye) and 0xA0 (KSEG1):
+		// saves ~50 ARM memory ops (FlushAllRegisters + RestoreAllRegisters) per dynamic read!
+		const void * fast_pread_fn = nullptr;
+		switch (bits)
+		{
+			case 32: fast_pread_fn = reinterpret_cast<const void *>(&_ReadFastPRead_u32); break;
+			case 16: fast_pread_fn = is_signed
+				? reinterpret_cast<const void *>(&_ReadFastPRead_s16)
+				: reinterpret_cast<const void *>(&_ReadFastPRead_u16); break;
+			case 8:  fast_pread_fn = is_signed
+				? reinterpret_cast<const void *>(&_ReadFastPRead_s8)
+				: reinterpret_cast<const void *>(&_ReadFastPRead_u8); break;
+		}
+		CJumpLocation fast_skip;
+		if (fast_pread_fn != nullptr)
+		{
+			MOV(ArmReg_R1, ArmReg_R14);
+			if (load_reg != ArmReg_R0)
+				MOV(ArmReg_R0, load_reg);
+			MOV32(ArmReg_R3, reinterpret_cast<u32>(fast_pread_fn));
+			BLX(ArmReg_R3);
+			MOV(ArmReg_R14, ArmReg_R1); // does not alter Z flag
+			CJumpLocation slow_miss = BX_IMM(CCodeLabel { NULL }, EQ);
+			if (arm_dest != ArmReg_R0)
+				MOV(arm_dest, ArmReg_R0);
+			if (current.IsSet())
+				GenerateBranchAlways(current);
+			else
+				fast_skip = GenerateBranchAlways(CCodeLabel { NULL });
+			PatchJumpLong(slow_miss, GetAssemblyBuffer()->GetLabel());
+		}
+
 		CN64RegisterCacheARM current_regs(mRegisterCache);
 		FlushAllRegisters(mRegisterCache, true);
 
-		if (load_reg != ArmReg_R0)
+		if (fast_pread_fn == nullptr && load_reg != ArmReg_R0)
 		{
 			MOV(ArmReg_R0, load_reg);
 		}
@@ -2041,6 +2197,8 @@ inline void CCodeGeneratorARM::GenerateLoad( u32 current_pc, EArmReg arm_dest, E
 		{	
 			 // patch the unconditional branch to skip the slow path
 			PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+			if (fast_skip.IsSet())
+				PatchJumpLong(fast_skip, GetAssemblyBuffer()->GetLabel());
 		}
 	}
 }
@@ -2048,6 +2206,71 @@ inline void CCodeGeneratorARM::GenerateLoad( u32 current_pc, EArmReg arm_dest, E
 //Load Word
 bool CCodeGeneratorARM::GenerateLW( u32 address, bool set_branch_delay, EN64Reg rt, EN64Reg base, s16 offset )
 {
+	if (!mRegisterCache.IsKnownValue(base, 0))
+	{
+		const bool is_stack_or_quick = (gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad);
+		const bool is_verified = !IsBufferB() && ((mVerifiedRdramMask & (1u << base)) != 0) && offset >= 0 && offset <= 4092;
+		if ((is_stack_or_quick && offset >= -4095 && offset <= 4095) || is_verified)
+		{
+			EArmReg arm_dest = GetRegisterNoLoadLo(rt, ArmReg_R0);
+			if (!IsBufferB() && mR0HostBase == base)
+			{
+				LDR(arm_dest, ArmReg_R0, offset);
+			}
+			else
+			{
+				EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+				ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+				LDR(arm_dest, ArmReg_R0, offset);
+			}
+			mR0HostBase = (!IsBufferB() && arm_dest != ArmReg_R0 && rt != base) ? base : N64Reg_R0;
+			UpdateRegister(rt, arm_dest, URO_HI_SIGN_EXTEND);
+			return true;
+		}
+
+		const u32 safe_limit = GetRdramSafeLimit();
+		if (!IsBufferB() && !set_branch_delay && mQuickLoad && base != N64Reg_R0 &&
+			offset >= 0 && offset <= 4092 && safe_limit != 0)
+		{
+			EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+			EArmReg arm_dest = GetRegisterNoLoadLo(rt, ArmReg_R0);
+			XOR_IMM(ArmReg_R0, reg_base, 0x80000000u, ArmReg_R3);
+			CMP_IMM_U32(ArmReg_R0, safe_limit, ArmReg_R3);
+			CJumpLocation deopt_loc = BX_IMM(CCodeLabel(nullptr), CS);
+			ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+			LDR(arm_dest, ArmReg_R0, offset);
+
+			CN64RegisterCacheARM saved_cache(mRegisterCache);
+			const u32 saved_verified = mVerifiedRdramMask;
+			SetBufferB();
+			PatchJumpLong(deopt_loc, GetAssemblyBuffer()->GetLabel());
+			FlushAllRegisters(mRegisterCache, true);
+			GetVar(ArmReg_R0, &gGPR[base]._u32_0);
+			if (offset != 0)
+				ADD_IMM(ArmReg_R0, ArmReg_R0, offset, ArmReg_R1);
+			MOV32(ArmReg_R1, address);
+			MOV32(ArmReg_R3, reinterpret_cast<u32>(ReadBitsDirect_u32));
+			BLX(ArmReg_R3);
+			if (rt != N64Reg_R0)
+			{
+				SetVar(&gGPR[rt]._u32_0, ArmReg_R0);
+				MOV_ASR_IMM(ArmReg_R1, ArmReg_R0, 0x1F);
+				SetVar(&gGPR[rt]._u32_1, ArmReg_R1);
+			}
+			SetVar(&gCPUState.CurrentPC, address + 4);
+			SetVar(&gCPUState.Delay, NO_DELAY);
+			RET();
+			mRegisterCache = saved_cache;
+			mVerifiedRdramMask = saved_verified | (1u << base);
+			SetBufferA();
+
+			mR0HostBase = (arm_dest != ArmReg_R0 && rt != base) ? base : N64Reg_R0;
+			UpdateRegister(rt, arm_dest, URO_HI_SIGN_EXTEND);
+			return true;
+		}
+	}
+
+	mR0HostBase = N64Reg_R0;
 	EArmReg arm_dest = GetRegisterNoLoadLo(rt, ArmReg_R0);
 	GenerateLoad( address, arm_dest, base, offset, 0, 32, false, set_branch_delay ? ReadBitsDirectBD_u32 : ReadBitsDirect_u32 );
 	UpdateRegister(rt, arm_dest, URO_HI_SIGN_EXTEND);
@@ -2362,26 +2585,51 @@ bool CCodeGeneratorARM::GenerateLWC1( u32 address, bool set_branch_delay, u32 ft
 	// Direct VFP VLDR avoids ARM11's ~8-12 cycle integer->VFP transfer stall (VMOV sX, r0).
 	if (mRegisterCache.IsKnownValue(base, 0))
 	{
+		mR0HostBase = N64Reg_R0;
 		const u32 eff_addr = mRegisterCache.GetKnownValue(base, 0)._u32 + static_cast<s32>(offset);
 		if ((eff_addr - 0x80000000u) < gRamSize && (eff_addr & 3u) == 0)
 		{
-			MOV32(ArmReg_R0, eff_addr);
-			ADD(ArmReg_R0, ArmReg_R0, gMemoryBaseReg);
+			MOV32(ArmReg_R0, reinterpret_cast<u32>(g_pu8RamBase) + (eff_addr - 0x80000000u));
 			VLDR(arm_ft, ArmReg_R0, 0);
 			UpdateFloatRegister(EN64FloatReg(ft));
 			return true;
 		}
+		if ((eff_addr & 3u) == 0)
+		{
+			const MemFuncRead & m = g_MemoryLookupTableRead[eff_addr >> 18];
+			if (m.pRead != nullptr)
+			{
+				MOV32(ArmReg_R0, reinterpret_cast<u32>(m.pRead) + eff_addr);
+				VLDR(arm_ft, ArmReg_R0, 0);
+				UpdateFloatRegister(EN64FloatReg(ft));
+				return true;
+			}
+		}
 	}
-	if ((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad))
+	const bool is_stack_or_quick = (gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad);
+	const bool is_verified = !IsBufferB() && ((mVerifiedRdramMask & (1u << base)) != 0) &&
+		(offset & 3) == 0 && offset >= 0 && offset <= 1020;
+	if (is_stack_or_quick || is_verified)
 	{
-		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
 		if ((offset & 3) == 0 && offset >= -1020 && offset <= 1020)
 		{
-			ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
-			VLDR(arm_ft, ArmReg_R0, offset);
+			if (!IsBufferB() && mR0HostBase == base)
+			{
+				VLDR(arm_ft, ArmReg_R0, offset);
+			}
+			else
+			{
+				EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+				ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+				VLDR(arm_ft, ArmReg_R0, offset);
+				if (!IsBufferB())
+					mR0HostBase = base;
+			}
 		}
 		else
 		{
+			mR0HostBase = N64Reg_R0;
+			EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
 			EArmReg load_reg = reg_base;
 			if (offset != 0)
 			{
@@ -2394,6 +2642,42 @@ bool CCodeGeneratorARM::GenerateLWC1( u32 address, bool set_branch_delay, u32 ft
 		UpdateFloatRegister(EN64FloatReg(ft));
 		return true;
 	}
+
+	const u32 safe_limit = GetRdramSafeLimit();
+	if (!IsBufferB() && !set_branch_delay && mQuickLoad && base != N64Reg_R0 &&
+		(offset & 3) == 0 && offset >= 0 && offset <= 1020 && safe_limit != 0)
+	{
+		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+		XOR_IMM(ArmReg_R0, reg_base, 0x80000000u, ArmReg_R3);
+		CMP_IMM_U32(ArmReg_R0, safe_limit, ArmReg_R3);
+		CJumpLocation deopt_loc = BX_IMM(CCodeLabel(nullptr), CS);
+		ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+		VLDR(arm_ft, ArmReg_R0, offset);
+
+		CN64RegisterCacheARM saved_cache(mRegisterCache);
+		SetBufferB();
+		PatchJumpLong(deopt_loc, GetAssemblyBuffer()->GetLabel());
+		FlushAllRegisters(mRegisterCache, true);
+		GetVar(ArmReg_R0, &gGPR[base]._u32_0);
+		if (offset != 0)
+			ADD_IMM(ArmReg_R0, ArmReg_R0, offset, ArmReg_R1);
+		MOV32(ArmReg_R1, address);
+		MOV32(ArmReg_R3, reinterpret_cast<u32>(ReadBitsDirect_u32));
+		BLX(ArmReg_R3);
+		SetVar(&gCPUState.FPU[ft]._u32, ArmReg_R0);
+		SetVar(&gCPUState.CurrentPC, address + 4);
+		SetVar(&gCPUState.Delay, NO_DELAY);
+		RET();
+		mRegisterCache = saved_cache;
+		SetBufferA();
+
+		mVerifiedRdramMask |= (1u << base);
+		mR0HostBase = base;
+		UpdateFloatRegister(EN64FloatReg(ft));
+		return true;
+	}
+
+	mR0HostBase = N64Reg_R0;
 
 	// Direct VFP VLDR on the bounds-checked RDRAM fast path too — eliminates ARM11's
 	// 8-12 cycle integer->VFP pipeline stall (VMOV sX, r0) on struct/entity float loads!
@@ -2422,10 +2706,24 @@ bool CCodeGeneratorARM::GenerateLWC1( u32 address, bool set_branch_delay, u32 ft
 	}
 	PatchJumpLong(loc, GetAssemblyBuffer()->GetLabel());
 
-	CN64RegisterCacheARM current_regs(mRegisterCache);
-	FlushAllRegisters(mRegisterCache, true);
+	// Zero-flush fast pRead path for 0x7F/0x70 (GoldenEye) and 0xA0 (KSEG1) float loads!
+	CJumpLocation fast_skip;
+	MOV(ArmReg_R1, ArmReg_R14);
 	if (load_reg != ArmReg_R0)
 		MOV(ArmReg_R0, load_reg);
+	MOV32(ArmReg_R3, reinterpret_cast<u32>(&_ReadFastPRead_u32));
+	BLX(ArmReg_R3);
+	MOV(ArmReg_R14, ArmReg_R1);
+	CJumpLocation slow_miss = BX_IMM(CCodeLabel { NULL }, EQ);
+	VMOV_S(arm_ft, ArmReg_R0);
+	if (current.IsSet())
+		GenerateBranchAlways(current);
+	else
+		fast_skip = GenerateBranchAlways(CCodeLabel { NULL });
+	PatchJumpLong(slow_miss, GetAssemblyBuffer()->GetLabel());
+
+	CN64RegisterCacheARM current_regs(mRegisterCache);
+	FlushAllRegisters(mRegisterCache, true);
 	MOV32(ArmReg_R1, address);
 	MOV32(ArmReg_R3, (u32)(set_branch_delay ? ReadBitsDirectBD_u32 : ReadBitsDirect_u32));
 	BLX(ArmReg_R3);
@@ -2441,6 +2739,8 @@ bool CCodeGeneratorARM::GenerateLWC1( u32 address, bool set_branch_delay, u32 ft
 	else
 	{
 		PatchJumpLong(skip, GetAssemblyBuffer()->GetLabel());
+		if (fast_skip.IsSet())
+			PatchJumpLong(fast_skip, GetAssemblyBuffer()->GetLabel());
 	}
 
 	UpdateFloatRegister(EN64FloatReg(ft));
@@ -2451,30 +2751,56 @@ bool CCodeGeneratorARM::GenerateLDC1( u32 address, bool set_branch_delay, u32 ft
 {
 	if (mRegisterCache.IsKnownValue(base, 0))
 	{
+		mR0HostBase = N64Reg_R0;
 		const u32 eff_addr = mRegisterCache.GetKnownValue(base, 0)._u32 + static_cast<s32>(offset);
 		if ((eff_addr - 0x80000000u) + 4u < gRamSize && (eff_addr & 3u) == 0)
 		{
-			MOV32(ArmReg_R0, eff_addr);
-			ADD(ArmReg_R0, ArmReg_R0, gMemoryBaseReg);
+			MOV32(ArmReg_R0, reinterpret_cast<u32>(g_pu8RamBase) + (eff_addr - 0x80000000u));
 			VLDR(EArmVfpReg(ft + 1), ArmReg_R0, 0);
 			VLDR(EArmVfpReg(ft), ArmReg_R0, 4);
 			UpdateFloatRegister(EN64FloatReg(ft + 1));
 			UpdateFloatRegister(EN64FloatReg(ft));
 			return true;
 		}
+		if ((eff_addr & 3u) == 0 && ((eff_addr + 4u) >> 18) == (eff_addr >> 18))
+		{
+			const MemFuncRead & m = g_MemoryLookupTableRead[eff_addr >> 18];
+			if (m.pRead != nullptr)
+			{
+				MOV32(ArmReg_R0, reinterpret_cast<u32>(m.pRead) + eff_addr);
+				VLDR(EArmVfpReg(ft + 1), ArmReg_R0, 0);
+				VLDR(EArmVfpReg(ft), ArmReg_R0, 4);
+				UpdateFloatRegister(EN64FloatReg(ft + 1));
+				UpdateFloatRegister(EN64FloatReg(ft));
+				return true;
+			}
+		}
 	}
 
-	if (((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad)) &&
-		(offset & 3) == 0 && offset >= -1016 && offset <= 1016)
+	if ((((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad)) &&
+		(offset & 3) == 0 && offset >= -1016 && offset <= 1016) ||
+		(!IsBufferB() && ((mVerifiedRdramMask & (1u << base)) != 0) && (offset & 3) == 0 && offset >= 0 && offset <= 1016))
 	{
-		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
-		ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
-		VLDR(EArmVfpReg(ft + 1), ArmReg_R0, offset);
-		VLDR(EArmVfpReg(ft), ArmReg_R0, offset + 4);
+		if (!IsBufferB() && mR0HostBase == base)
+		{
+			VLDR(EArmVfpReg(ft + 1), ArmReg_R0, offset);
+			VLDR(EArmVfpReg(ft), ArmReg_R0, offset + 4);
+		}
+		else
+		{
+			EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+			ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+			VLDR(EArmVfpReg(ft + 1), ArmReg_R0, offset);
+			VLDR(EArmVfpReg(ft), ArmReg_R0, offset + 4);
+			if (!IsBufferB())
+				mR0HostBase = base;
+		}
 		UpdateFloatRegister(EN64FloatReg(ft + 1));
 		UpdateFloatRegister(EN64FloatReg(ft));
 		return true;
 	}
+
+	mR0HostBase = N64Reg_R0;
 
 	// Single bounds-checked direct VLDR pair (1 check instead of 2, zero VMOV stalls!).
 	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
@@ -2571,7 +2897,9 @@ inline void CCodeGeneratorARM::GenerateStore(u32 address, EArmReg arm_src, EN64R
 		}
 	}
 
-	if ((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad))
+	if ((gDynarecStackOptimisation && base == N64Reg_SP) ||
+		(gMemoryAccessOptimisation && mQuickLoad) ||
+		(!IsBufferB() && (mVerifiedRdramMask & (1u << base)) != 0 && offset >= 0 && offset <= 4090))
 	{
 		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
 		if (bits == 32 && twiddle == 0 && offset != 0 && offset >= -4095 && offset <= 4095)
@@ -2682,25 +3010,39 @@ bool CCodeGeneratorARM::GenerateSWC1( u32 address, bool set_branch_delay, u32 ft
 	// Direct VFP VSTR avoids ARM11's ~8-12 cycle VFP->integer transfer stall (VMOV r1, sX).
 	if (mRegisterCache.IsKnownValue(base, 0))
 	{
+		mR0HostBase = N64Reg_R0;
 		const u32 eff_addr = mRegisterCache.GetKnownValue(base, 0)._u32 + static_cast<s32>(offset);
 		if ((eff_addr - 0x80000000u) < gRamSize && (eff_addr & 3u) == 0)
 		{
-			MOV32(ArmReg_R0, eff_addr);
-			ADD(ArmReg_R0, ArmReg_R0, gMemoryBaseReg);
+			MOV32(ArmReg_R0, reinterpret_cast<u32>(g_pu8RamBase) + (eff_addr - 0x80000000u));
 			VSTR(arm_ft, ArmReg_R0, 0);
 			return true;
 		}
 	}
-	if ((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad))
+	const bool is_stack_or_quick = (gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad);
+	const bool is_verified = !IsBufferB() && ((mVerifiedRdramMask & (1u << base)) != 0) &&
+		(offset & 3) == 0 && offset >= 0 && offset <= 1020;
+	if (is_stack_or_quick || is_verified)
 	{
-		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
 		if ((offset & 3) == 0 && offset >= -1020 && offset <= 1020)
 		{
-			ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
-			VSTR(arm_ft, ArmReg_R0, offset);
+			if (!IsBufferB() && mR0HostBase == base)
+			{
+				VSTR(arm_ft, ArmReg_R0, offset);
+			}
+			else
+			{
+				EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+				ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+				VSTR(arm_ft, ArmReg_R0, offset);
+				if (!IsBufferB())
+					mR0HostBase = base;
+			}
 		}
 		else
 		{
+			mR0HostBase = N64Reg_R0;
+			EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
 			EArmReg store_reg = reg_base;
 			if (offset != 0)
 			{
@@ -2712,6 +3054,41 @@ bool CCodeGeneratorARM::GenerateSWC1( u32 address, bool set_branch_delay, u32 ft
 		}
 		return true;
 	}
+
+	const u32 safe_limit = GetRdramSafeLimit();
+	if (!IsBufferB() && !set_branch_delay && mQuickLoad && base != N64Reg_R0 &&
+		(offset & 3) == 0 && offset >= 0 && offset <= 1020 && safe_limit != 0)
+	{
+		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+		XOR_IMM(ArmReg_R0, reg_base, 0x80000000u, ArmReg_R3);
+		CMP_IMM_U32(ArmReg_R0, safe_limit, ArmReg_R3);
+		CJumpLocation deopt_loc = BX_IMM(CCodeLabel(nullptr), CS);
+		ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+		VSTR(arm_ft, ArmReg_R0, offset);
+
+		CN64RegisterCacheARM saved_cache(mRegisterCache);
+		SetBufferB();
+		PatchJumpLong(deopt_loc, GetAssemblyBuffer()->GetLabel());
+		FlushAllRegisters(mRegisterCache, true);
+		GetVar(ArmReg_R0, &gGPR[base]._u32_0);
+		if (offset != 0)
+			ADD_IMM(ArmReg_R0, ArmReg_R0, offset, ArmReg_R1);
+		GetVar(ArmReg_R1, &gCPUState.FPU[ft]._u32);
+		MOV32(ArmReg_R2, address);
+		MOV32(ArmReg_R3, reinterpret_cast<u32>(WriteBitsDirect_u32));
+		BLX(ArmReg_R3);
+		SetVar(&gCPUState.CurrentPC, address + 4);
+		SetVar(&gCPUState.Delay, NO_DELAY);
+		RET();
+		mRegisterCache = saved_cache;
+		SetBufferA();
+
+		mVerifiedRdramMask |= (1u << base);
+		mR0HostBase = base;
+		return true;
+	}
+
+	mR0HostBase = N64Reg_R0;
 
 	// Direct VFP VSTR on the bounds-checked RDRAM fast path too — eliminates ARM11's
 	// 8-12 cycle VFP->integer pipeline stall (VMOV r1, sX) on struct/entity float stores!
@@ -2772,26 +3149,39 @@ bool CCodeGeneratorARM::GenerateSDC1( u32 address, bool set_branch_delay, u32 ft
 
 	if (mRegisterCache.IsKnownValue(base, 0))
 	{
+		mR0HostBase = N64Reg_R0;
 		const u32 eff_addr = mRegisterCache.GetKnownValue(base, 0)._u32 + static_cast<s32>(offset);
 		if ((eff_addr - 0x80000000u) + 4u < gRamSize && (eff_addr & 3u) == 0)
 		{
-			MOV32(ArmReg_R0, eff_addr);
-			ADD(ArmReg_R0, ArmReg_R0, gMemoryBaseReg);
+			MOV32(ArmReg_R0, reinterpret_cast<u32>(g_pu8RamBase) + (eff_addr - 0x80000000u));
 			VSTR(EArmVfpReg(ft + 1), ArmReg_R0, 0);
 			VSTR(EArmVfpReg(ft), ArmReg_R0, 4);
 			return true;
 		}
 	}
 
-	if (((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad)) &&
-		(offset & 3) == 0 && offset >= -1016 && offset <= 1016)
+	if ((((gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad)) &&
+		(offset & 3) == 0 && offset >= -1016 && offset <= 1016) ||
+		(!IsBufferB() && ((mVerifiedRdramMask & (1u << base)) != 0) && (offset & 3) == 0 && offset >= 0 && offset <= 1016))
 	{
-		EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
-		ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
-		VSTR(EArmVfpReg(ft + 1), ArmReg_R0, offset);
-		VSTR(EArmVfpReg(ft), ArmReg_R0, offset + 4);
+		if (!IsBufferB() && mR0HostBase == base)
+		{
+			VSTR(EArmVfpReg(ft + 1), ArmReg_R0, offset);
+			VSTR(EArmVfpReg(ft), ArmReg_R0, offset + 4);
+		}
+		else
+		{
+			EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+			ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+			VSTR(EArmVfpReg(ft + 1), ArmReg_R0, offset);
+			VSTR(EArmVfpReg(ft), ArmReg_R0, offset + 4);
+			if (!IsBufferB())
+				mR0HostBase = base;
+		}
 		return true;
 	}
+
+	mR0HostBase = N64Reg_R0;
 
 	// Single bounds-checked direct VSTR pair (1 check instead of 2, zero VMOV stalls!).
 	EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R0);
@@ -2854,6 +3244,62 @@ bool CCodeGeneratorARM::GenerateSDC1( u32 address, bool set_branch_delay, u32 ft
 bool CCodeGeneratorARM::GenerateSW( u32 address, bool set_branch_delay, EN64Reg rt, EN64Reg base, s16 offset )
 {
 	EArmReg reg = GetRegisterAndLoadLo(rt, ArmReg_R1);
+	if (!mRegisterCache.IsKnownValue(base, 0))
+	{
+		const bool is_stack_or_quick = (gDynarecStackOptimisation && base == N64Reg_SP) || (gMemoryAccessOptimisation && mQuickLoad);
+		const bool is_verified = !IsBufferB() && ((mVerifiedRdramMask & (1u << base)) != 0) && offset >= 0 && offset <= 4092;
+		if ((is_stack_or_quick && offset >= -4095 && offset <= 4095) || is_verified)
+		{
+			if (!IsBufferB() && mR0HostBase == base)
+			{
+				STR(reg, ArmReg_R0, offset);
+			}
+			else
+			{
+				EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+				ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+				STR(reg, ArmReg_R0, offset);
+				if (!IsBufferB())
+					mR0HostBase = base;
+			}
+			return true;
+		}
+
+		const u32 safe_limit = GetRdramSafeLimit();
+		if (!IsBufferB() && !set_branch_delay && mQuickLoad && base != N64Reg_R0 &&
+			offset >= 0 && offset <= 4092 && safe_limit != 0)
+		{
+			EArmReg reg_base = GetRegisterAndLoadLo(base, ArmReg_R2);
+			XOR_IMM(ArmReg_R0, reg_base, 0x80000000u, ArmReg_R3);
+			CMP_IMM_U32(ArmReg_R0, safe_limit, ArmReg_R3);
+			CJumpLocation deopt_loc = BX_IMM(CCodeLabel(nullptr), CS);
+			ADD(ArmReg_R0, reg_base, gMemoryBaseReg);
+			STR(reg, ArmReg_R0, offset);
+
+			CN64RegisterCacheARM saved_cache(mRegisterCache);
+			SetBufferB();
+			PatchJumpLong(deopt_loc, GetAssemblyBuffer()->GetLabel());
+			FlushAllRegisters(mRegisterCache, true);
+			GetVar(ArmReg_R0, &gGPR[base]._u32_0);
+			if (offset != 0)
+				ADD_IMM(ArmReg_R0, ArmReg_R0, offset, ArmReg_R1);
+			GetVar(ArmReg_R1, &gGPR[rt]._u32_0);
+			MOV32(ArmReg_R2, address);
+			MOV32(ArmReg_R3, reinterpret_cast<u32>(WriteBitsDirect_u32));
+			BLX(ArmReg_R3);
+			SetVar(&gCPUState.CurrentPC, address + 4);
+			SetVar(&gCPUState.Delay, NO_DELAY);
+			RET();
+			mRegisterCache = saved_cache;
+			SetBufferA();
+
+			mVerifiedRdramMask |= (1u << base);
+			mR0HostBase = base;
+			return true;
+		}
+	}
+
+	mR0HostBase = N64Reg_R0;
 	GenerateStore( address, reg, base, offset, 0, 32, set_branch_delay ? WriteBitsDirectBD_u32 : WriteBitsDirect_u32 );
 
 	return true;

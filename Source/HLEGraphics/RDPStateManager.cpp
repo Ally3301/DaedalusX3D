@@ -314,7 +314,8 @@ static inline void CopyLineSwap32(void * dst, const void * src, u32 bytes)
 
 
 CRDPStateManager::CRDPStateManager()
-:	EmulateMirror(true)
+:	mStateGen(1)
+,	EmulateMirror(true)
 {
 	ClearAllEntries();
 	InvalidateAllTileTextureInfo();
@@ -342,6 +343,7 @@ void CRDPStateManager::SetTile( const RDP_Tile & tile )
 	{
 		mTiles[ idx ] = tile;
 		mTileTextureInfoValid[ idx ] = false;
+		++mStateGen;
 	}
 }
 
@@ -353,6 +355,7 @@ void CRDPStateManager::SetTileSize( const RDP_TileSize & tile_size )
 	{
 		mTileSizes[ idx ] = tile_size;
 		mTileTextureInfoValid[ idx ] = false;
+		++mStateGen;
 	}
 }
 
@@ -574,6 +577,7 @@ void CRDPStateManager::LoadTlut(const SetLoadTile & load)
 
 	//Store address of PAL (assuming PAL is only stored in upper half of TMEM) //Corn
 	gTlutLoadAddresses[ (rdp_tile.tmem>>2) & 0x3F ] = ram_offset;
+	InvalidateAllTileTextureInfo();
 #ifdef DAEDALUS_DEBUG_DISPLAYLIST
 	DL_PF("    TLut Addr[0x%08x] TMEM[0x%03x] Tile[%d] Count[%d] Format[%s] (%d,%d)->(%d,%d)",
 		ram_offset, rdp_tile.tmem, tile_idx, count, kTLUTTypeName[gRDPOtherMode.text_tlut], uls >> 2, ult >> 2, lrs >> 2, lrt >> 2);

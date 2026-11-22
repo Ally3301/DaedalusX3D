@@ -41,8 +41,10 @@ struct SPicaTevProgram
 	bool          usesTex0;
 	bool          usesTex1;
 	u8            numStages;
-	u8            bufWriteRgbMask;   // bit s -> write stage s RGB to TEV buffer (s in 0..3)
-	u8            bufWriteAlphaMask; // bit s -> write stage s Alpha to TEV buffer (s in 0..3)
+	u8            bufWriteRgbMask;       // bit s -> write stage s RGB to TEV buffer (s in 0..3)
+	u8            bufWriteAlphaMask;     // bit s -> write stage s Alpha to TEV buffer (s in 0..3)
+	u8            constUsedMask;         // bit 0=prim, bit 1=env, bit 2=primLod
+	u8            dynamicConstStageMask; // bit s -> stage s depends on prim/env/primLod
 	SPicaTevStage stages[6];
 };
 
@@ -57,4 +59,8 @@ namespace PicaTEV
 	// Applies a compiled TEV program to PICA200 hardware registers using live
 	// Primitive, Environment, and PrimLODFraction values.
 	void ApplyProgram(const SPicaTevProgram & prog, u32 primABGR, u32 envABGR, u8 primLodU8);
+
+	// Fast color-only update when the active TEV program hasn't changed, updating ONLY
+	// the C3D_TexEnvColor registers of stages that reference live prim/env/primLod.
+	void UpdateProgramColors(const SPicaTevProgram & prog, u32 primABGR, u32 envABGR, u8 primLodU8);
 }

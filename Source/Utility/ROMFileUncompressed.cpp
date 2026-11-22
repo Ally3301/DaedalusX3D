@@ -83,6 +83,13 @@ bool ROMFileUncompressed::Open( COutputStream & messages )
 		return false;
 	}
 
+#ifdef DAEDALUS_CTR
+	// Bypass newlib's 1 KiB stdio buffer so ROMFileCache (32 KiB chunks) and
+	// LoadRawData stream directly from fs:USER into destination FCRAM without
+	// extra CPU copies or double-buffering cache thrash.
+	setvbuf( mFH, nullptr, _IONBF, 0 );
+#endif
+
 	return true;
 }
 

@@ -101,6 +101,11 @@ private:
 	u32					mFastWrap0V;
 	u32					mFastWrap1U;
 	u32					mFastWrap1V;
+	u32					mFastTile0ST;
+	u32					mFastTile1ST;
+	u8					mFastConstMask;
+	bool				mFastUsesTex0;
+	bool				mFastUsesTex1;
 	bool				mFastHasTex;
 
 	void				InstallNativeTexture(const CNativeTexture * texture, u32 wrap_s = GPU_CLAMP_TO_EDGE, u32 wrap_t = GPU_CLAMP_TO_EDGE, int unit = 0, bool setTexEnabled = true);

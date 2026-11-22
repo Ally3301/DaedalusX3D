@@ -159,6 +159,10 @@ CNativeTexture::CNativeTexture( u32 w, u32 h, ETextureFormat texture_format )
 ,	mpPalette( NULL )
 ,	mHasTex( false )
 ,	mOnVram( false )
+,	mDynamic( false )
+,	mQueuedForVram( false )
+,	mBindFrames( 0 )
+,	mLastBindFrame( 0 )
 ,	mCachedFilter( -1 )
 ,	mCachedWrapS( -1 )
 ,	mCachedWrapT( -1 )
@@ -193,6 +197,11 @@ CNativeTexture::CNativeTexture( u32 w, u32 h, ETextureFormat texture_format )
 
 CNativeTexture::~CNativeTexture()
 {
+	if (mQueuedForVram)
+	{
+		Citro3D::UnregisterTextureVramPromotion(this);
+		mQueuedForVram = false;
+	}
 	if (mpData)
 		free(mpData);
 	if (mpPalette)
@@ -200,7 +209,17 @@ CNativeTexture::~CNativeTexture()
 
 	if (mHasTex)
 	{
-		C3D_TexDelete(&mTex);
+		if (mTex.data != nullptr && Citro3D::IsInitialised() && !Citro3D::IsExiting())
+		{
+			// Defer freeing until the next C3D_FrameBegin waits for the in-flight GPU frame,
+			// so PICA200 never samples a freed VRAM/FCRAM texture buffer on real 3DS hardware.
+			Citro3D::DeferTexDataFree(mTex.data);
+			mTex.data = nullptr;
+		}
+		else
+		{
+			C3D_TexDelete(&mTex);
+		}
 		mHasTex = false;
 	}
 }
@@ -213,7 +232,81 @@ bool CNativeTexture::HasData() const
 void CNativeTexture::InstallTexture() const
 {
 	if (mHasTex)
+	{
+		NoteBoundForVram();
 		Citro3D::BindTexture(&mTex);
+	}
+}
+
+void CNativeTexture::NoteBoundForVram() const
+{
+	if (!mHasTex || mOnVram || mDynamic || mQueuedForVram)
+		return;
+	const u32 frame = Citro3D::GetFrameCounter();
+	if (frame == 0 || frame == mLastBindFrame)
+		return;
+	mLastBindFrame = frame;
+	if (++mBindFrames >= 2)
+	{
+		// Promote static/reused textures (up to 128 KiB each) into the 3DS's dedicated
+		// 6 MiB on-chip VRAM so PICA200 texture fetches stop competing with ARM11 for FCRAM.
+		const u32 bytes = C3D_TexCalcTotalSize(mTex.size, mTex.maxLevel);
+		if (bytes >= 16u && bytes <= 131072u && (bytes & 15u) == 0)
+		{
+			mQueuedForVram = true;
+			Citro3D::QueueTextureVramPromotion(const_cast<CNativeTexture *>(this));
+		}
+	}
+}
+
+bool CNativeTexture::TryPromoteToVram()
+{
+	mQueuedForVram = false;
+	if (!mHasTex || mOnVram || mDynamic || mTex.data == nullptr)
+		return false;
+
+	const u32 bytes = C3D_TexCalcTotalSize(mTex.size, mTex.maxLevel);
+	// Always keep 512 KiB of VRAM headroom free for render targets and system stability.
+	if (bytes < 16u || (bytes & 15u) != 0 || vramSpaceFree() < bytes + 512u * 1024u)
+		return false;
+
+	void * vramPtr = vramAlloc(bytes);
+	if (vramPtr == nullptr)
+		return false;
+
+	void * oldLinear = mTex.data;
+	// Called right after C3D_FrameBegin(0) before any draws (cmdBufUsage == 0):
+	// C3D_SyncTextureCopy emits 1 async GX_TextureCopy DMA with zero C3D_FrameSplit!
+	C3D_SyncTextureCopy(static_cast<u32 *>(oldLinear), 0, static_cast<u32 *>(vramPtr), 0, bytes, 8);
+	mTex.data = vramPtr;
+	mOnVram = true;
+	Citro3D::DeferTexDataFree(oldLinear);
+	return true;
+}
+
+bool CNativeTexture::EnsureLinearForCpuWrite()
+{
+	if (!mHasTex || mTex.data == nullptr)
+		return false;
+	if (mQueuedForVram)
+	{
+		Citro3D::UnregisterTextureVramPromotion(this);
+		mQueuedForVram = false;
+	}
+	if (mOnVram)
+	{
+		// Texture contents changed dynamically: move back to linear FCRAM and mark
+		// dynamic so it never ping-pongs with VRAM again.
+		mDynamic = true;
+		const u32 bytes = C3D_TexCalcTotalSize(mTex.size, mTex.maxLevel);
+		void * newLinear = linearAlloc(bytes);
+		if (newLinear == nullptr)
+			return false;
+		Citro3D::DeferTexDataFree(mTex.data);
+		mTex.data = newLinear;
+		mOnVram = false;
+	}
+	return true;
 }
 
 void CNativeTexture::ApplyParams( GPU_TEXTURE_FILTER_PARAM filter, GPU_TEXTURE_WRAP_PARAM wrap_s, GPU_TEXTURE_WRAP_PARAM wrap_t ) const
@@ -402,6 +495,8 @@ void CNativeTexture::SetData( void * data, void * palette )
 	if ((mTextureFormat == TexFmt_CI4_8888 || mTextureFormat == TexFmt_CI8_8888) &&
 		palette == nullptr)
 		return;
+	if (!EnsureLinearForCpuWrite())
+		return;
 
 	const u32 w = mCorrectedWidth;
 	const u32 h = mCorrectedHeight;
@@ -409,8 +504,6 @@ void CNativeTexture::SetData( void * data, void * palette )
 	const u32 tilesY = h >> 3;
 	const u32 srcStrideBytes = GetStride();
 	void * const staging = mTex.data;
-	if (staging == nullptr)
-		return;
 
 	// PICA200 texture convention (matching picaGL & ctr64):
 	// UV v=0.0 samples tiled row (h - 1), and UV v=1.0 samples tiled row 0.
@@ -614,7 +707,7 @@ void CNativeTexture::SetData( void * data, void * palette )
 
 void CNativeTexture::SetDataRaw5551( const u16 * pixels, u32 src_w, u32 src_h )
 {
-	if (!mHasTex || pixels == nullptr || mTex.fmt != GPU_RGBA5551 || mTex.data == nullptr)
+	if (!mHasTex || pixels == nullptr || mTex.fmt != GPU_RGBA5551 || !EnsureLinearForCpuWrite())
 		return;
 
 	const u32 w = mCorrectedWidth;
@@ -657,7 +750,7 @@ void CNativeTexture::SetDataRaw5551( const u16 * pixels, u32 src_w, u32 src_h )
 
 bool CNativeTexture::UploadDirectN64RGBA16( const u8 * rdram, u32 load_addr, u32 pitch, bool swapped )
 {
-	if (!mHasTex || rdram == nullptr || mTex.fmt != GPU_RGBA5551 || mTex.data == nullptr || mWidth == 0 || mHeight == 0)
+	if (!mHasTex || rdram == nullptr || mTex.fmt != GPU_RGBA5551 || mWidth == 0 || mHeight == 0 || !EnsureLinearForCpuWrite())
 		return false;
 
 	const u32 w = mCorrectedWidth;
@@ -683,6 +776,8 @@ bool CNativeTexture::UploadDirectN64RGBA16( const u8 * rdram, u32 load_addr, u32
 				if (y > maxSrcY)
 					y = maxSrcY;
 				const u32 rowAddr = load_addr + y * pitch + (baseX << 1);
+				if (y > 0)
+					__builtin_prefetch(rdram + ((load_addr + (y - 1) * pitch + (baseX << 1)) & ~31u), 0, 0);
 				const u8 * lut = &kMortonLut[ly << 3];
 				if (swapped && (y & 1u))
 				{
@@ -716,7 +811,7 @@ bool CNativeTexture::UploadDirectN64RGBA16( const u8 * rdram, u32 load_addr, u32
 
 bool CNativeTexture::UploadDirectN64CI( const u8 * rdram, u32 load_addr, u32 pitch, u32 tlut_addr, bool is_ci8, bool swapped )
 {
-	if (!mHasTex || rdram == nullptr || mTex.fmt != GPU_RGBA5551 || mTex.data == nullptr || tlut_addr < 0x1000u || mWidth == 0 || mHeight == 0)
+	if (!mHasTex || rdram == nullptr || mTex.fmt != GPU_RGBA5551 || tlut_addr < 0x1000u || mWidth == 0 || mHeight == 0 || !EnsureLinearForCpuWrite())
 		return false;
 
 	const u32 w = mCorrectedWidth;
@@ -749,6 +844,8 @@ bool CNativeTexture::UploadDirectN64CI( const u8 * rdram, u32 load_addr, u32 pit
 						y = maxSrcY;
 					const u32 f = (swapped && (y & 1u)) ? 7u : 3u;
 					const u32 rowAddr = load_addr + y * pitch + baseX;
+					if (y > 0)
+						__builtin_prefetch(rdram + ((load_addr + (y - 1) * pitch + baseX) & ~31u), 0, 0);
 					const u8 * lut = &kMortonLut[ly << 3];
 					tileDst[lut[0]] = pal[rdram[(rowAddr + 0u) ^ f]];
 					tileDst[lut[1]] = pal[rdram[(rowAddr + 1u) ^ f]];

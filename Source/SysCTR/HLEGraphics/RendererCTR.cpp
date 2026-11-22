@@ -59,6 +59,7 @@ void RendererCTR::InstallNativeTexture(const CNativeTexture * texture, u32 wrap_
 	const GPU_TEXTURE_FILTER_PARAM filt = (((gRDPOtherMode.text_filt != G_TF_POINT) && cycle_mode != CYCLE_COPY) ||
 		gGlobalPreferences.ForceLinearFilter) ? GPU_LINEAR : GPU_NEAREST;
 	texture->ApplyParams(filt, static_cast<GPU_TEXTURE_WRAP_PARAM>(wrap_s), static_cast<GPU_TEXTURE_WRAP_PARAM>(wrap_t));
+	texture->NoteBoundForVram();
 	Citro3D::BindTextureUnit(unit, texture->GetC3DTexture());
 }
 
@@ -199,6 +200,11 @@ RendererCTR::RendererCTR()
 ,	mFastWrap0V(0)
 ,	mFastWrap1U(0)
 ,	mFastWrap1V(0)
+,	mFastTile0ST(0)
+,	mFastTile1ST(0)
+,	mFastConstMask(0)
+,	mFastUsesTex0(false)
+,	mFastUsesTex1(false)
 ,	mFastHasTex(false)
 {
 	// Set up RGB = T0, A = T0
@@ -565,27 +571,24 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 	const u32 primCol  = mPrimitiveColour.GetColour();
 	const u32 envCol   = mEnvColour.GetColour();
 	const u32 blendCol = mBlendColour.GetColour();
-	const float lodF   = mPrimLODFraction < 0.0f ? 0.0f : (mPrimLODFraction > 1.0f ? 1.0f : mPrimLODFraction);
-	const u8 primLod   = static_cast<u8>(lodF * 255.0f + 0.5f);
+	const u8 primLod   = mPrimLODByte;
+	const u32 tile0ST  = (static_cast<u32>(static_cast<u16>(mTileTopLeft[0].s)) << 16) | static_cast<u16>(mTileTopLeft[0].t);
+	const u32 tile1ST  = (static_cast<u32>(static_cast<u16>(mTileTopLeft[1].s)) << 16) | static_cast<u16>(mTileTopLeft[1].t);
 
 	// Fast path: when consecutive triangle draws share identical RDP state, mux,
-	// colours, and bound textures, skip all state setup and go straight to DrawPrimitives
-	// (which coalesces contiguous GPU_TRIANGLES into a single hardware draw call!).
+	// relevant colours, and relevant bound textures (including 2-cycle dual-texture TEV!),
+	// skip all state setup and go straight to DrawPrimitives (maximizing PICA200 batch merging!).
 	if (mFastStateValid &&
 		mFastMux        == mMux &&
 		mFastOtherMode  == gRDPOtherMode._u64 &&
 		mFastTnlFlags   == (mTnL.Flags._u32 & TNL_ZBUFFER) &&
 		mFastDisableZ   == disable_zbuffer &&
-		mFastPrimCol    == primCol &&
-		mFastEnvCol     == envCol &&
 		mFastBlendCol   == blendCol &&
-		mFastPrimLod    == primLod &&
-		mFastTex0       == mBoundTexture[0] &&
-		mFastTex1       == mBoundTexture[1] &&
-		mFastWrap0U     == mTexWrap[0].u &&
-		mFastWrap0V     == mTexWrap[0].v &&
-		mFastWrap1U     == mTexWrap[1].u &&
-		mFastWrap1V     == mTexWrap[1].v)
+		(!(mFastConstMask & 1u) || mFastPrimCol == primCol) &&
+		(!(mFastConstMask & 2u) || mFastEnvCol  == envCol)  &&
+		(!(mFastConstMask & 4u) || mFastPrimLod == primLod) &&
+		(!mFastUsesTex0 || (mFastTex0 == mBoundTexture[0] && mFastWrap0U == mTexWrap[0].u && mFastWrap0V == mTexWrap[0].v)) &&
+		(!mFastUsesTex1 || (mFastTex1 == mBoundTexture[1] && mFastWrap1U == mTexWrap[1].u && mFastWrap1V == mTexWrap[1].v && mFastTile0ST == tile0ST && mFastTile1ST == tile1ST)))
 	{
 		DrawPrimitives(p_vertices, num_vertices, triangle_mode, mFastHasTex);
 		return;
@@ -663,6 +666,11 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 			mFastWrap0V     = mTexWrap[0].v;
 			mFastWrap1U     = mTexWrap[1].u;
 			mFastWrap1V     = mTexWrap[1].v;
+			mFastTile0ST    = tile0ST;
+			mFastTile1ST    = tile1ST;
+			mFastConstMask  = 0;
+			mFastUsesTex0   = true;
+			mFastUsesTex1   = false;
 			mFastHasTex     = true;
 
 			DrawPrimitives(p_vertices, num_vertices, triangle_mode, true);
@@ -742,7 +750,7 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 
 		if (texturesOk)
 		{
-			if (mLastTevProg != &prog || mLastTevPrim != primCol || mLastTevEnv != envCol || mLastTevPrimLod != primLod)
+			if (mLastTevProg != &prog)
 			{
 				PicaTEV::ApplyProgram(prog, primCol, envCol, primLod);
 				mLastTevProg    = &prog;
@@ -750,9 +758,18 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 				mLastTevEnv     = envCol;
 				mLastTevPrimLod = primLod;
 			}
+			else if (((prog.constUsedMask & 1u) && mLastTevPrim != primCol) ||
+			         ((prog.constUsedMask & 2u) && mLastTevEnv  != envCol)  ||
+			         ((prog.constUsedMask & 4u) && mLastTevPrimLod != primLod))
+			{
+				PicaTEV::UpdateProgramColors(prog, primCol, envCol, primLod);
+				mLastTevPrim    = primCol;
+				mLastTevEnv     = envCol;
+				mLastTevPrimLod = primLod;
+			}
 			Citro3D::MarkCustomTevActive();
 
-			mFastStateValid = !prog.usesTex1; // Cache fast-path for single-tex / untextured TEV programs
+			mFastStateValid = true;
 			mFastMux        = mMux;
 			mFastOtherMode  = gRDPOtherMode._u64;
 			mFastTnlFlags   = (mTnL.Flags._u32 & TNL_ZBUFFER);
@@ -767,6 +784,11 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 			mFastWrap0V     = mTexWrap[0].v;
 			mFastWrap1U     = mTexWrap[1].u;
 			mFastWrap1V     = mTexWrap[1].v;
+			mFastTile0ST    = tile0ST;
+			mFastTile1ST    = tile1ST;
+			mFastConstMask  = prog.constUsedMask;
+			mFastUsesTex0   = prog.usesTex0;
+			mFastUsesTex1   = prog.usesTex1;
 			mFastHasTex     = prog.usesTex0 || prog.usesTex1;
 
 			DrawPrimitives(p_vertices, num_vertices, triangle_mode, mFastHasTex);
@@ -822,9 +844,13 @@ void RendererCTR::RenderUsingCurrentBlendMode(const float (&mat_project)[16], Da
 
 void RendererCTR::RenderTriangles(DaedalusVtx *p_vertices, u32 num_vertices, bool disable_zbuffer)
 {
+#ifdef DAEDALUS_CTR_XRAY
 	const u64 drw_t0 = svcGetSystemTick();
+#endif
 	RenderUsingCurrentBlendMode(gProjection.m, p_vertices, num_vertices, GPU_TRIANGLES, disable_zbuffer);
+#ifdef DAEDALUS_CTR_XRAY
 	PerfCTR::AddDraw(svcGetSystemTick() - drw_t0);
+#endif
 }
 
 void RendererCTR::TexRect(u32 tile_idx, const v2 & xy0, const v2 & xy1, TexCoord st0, TexCoord st1)

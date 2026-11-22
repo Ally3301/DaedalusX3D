@@ -64,10 +64,12 @@ namespace
 	{
 #ifdef DAEDALUS_CTR
 		// Derive the in-RAM fixed ROM ceiling from the active process heap
-		// minus 26 MiB reserved for RDRAM (8 MiB), dynarec caches (8-10 MiB),
-		// and runtime allocations, capped at 32 MiB.
+		// reserving space for RDRAM (8 MiB), dynamic JIT buffers (9.5-18 MiB),
+		// and runtime allocations so real Old 3DS hardware never OOMs.
 		const u32 heap_cap = envGetHeapSize();
-		const u32 reserve  = 26u * 1024u * 1024u;
+		const u32 reserve  = (heap_cap >= 60u * 1024u * 1024u)
+			? (30u * 1024u * 1024u)
+			: (26u * 1024u * 1024u);
 		u32 max_fixed = (heap_cap > reserve) ? (heap_cap - reserve) : 0u;
 		const u32 cap_limit = 32u * 1024u * 1024u;
 		if (max_fixed > cap_limit)

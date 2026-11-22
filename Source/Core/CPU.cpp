@@ -25,6 +25,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <algorithm>
 #ifdef DAEDALUS_CTR
 #include <cstdio>
+extern void HandleVblWatchdog();
 #ifdef DAEDALUS_CTR_XRAY
 #include "SysCTR/Utility/PerfProfilerCTR.h"
 #endif
@@ -730,6 +731,9 @@ void CPU_HANDLE_COUNT_INTERRUPT()
 			}
 
 			HandleSaveStateOperationOnVerticalBlank();
+#ifdef DAEDALUS_CTR
+			HandleVblWatchdog();
+#endif
 		}
 		break;
 	case CPU_EVENT_COMPARE:

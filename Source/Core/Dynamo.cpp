@@ -254,6 +254,7 @@ void R4300_CALL_TYPE CPU_InvalidateICacheRange( u32 address, u32 length )
 					const u32 ne = (e1 > e2) ? e1 : e2;
 					gPendingInvals[i].addr = ns;
 					gPendingInvals[i].len  = ne - ns;
+					gCPUState.AddJob(CPU_CHANGE_CORE);
 					return;
 				}
 			}
@@ -262,6 +263,9 @@ void R4300_CALL_TYPE CPU_InvalidateICacheRange( u32 address, u32 length )
 				gPendingInvals[gPendingInvalCount].addr = address;
 				gPendingInvals[gPendingInvalCount].len  = length;
 				++gPendingInvalCount;
+				// Exit any running compiled ARM fragment chain so the invalidated
+				// range is evicted before jumping into newly loaded overlay code.
+				gCPUState.AddJob(CPU_CHANGE_CORE);
 				return;
 			}
 		}
@@ -372,7 +376,11 @@ template< bool TraceEnabled > DAEDALUS_FORCEINLINE void CPU_EXECUTE_OP()
 void	CPU_ResetFragmentCache()
 {
 	// Need to make sure this happens at a safe point, so we use a flag
+	// and force any active ARM fragment chain to exit back to C++.
 	gResetFragmentCache	= true;
+#ifdef DAEDALUS_CTR
+	gCPUState.AddJob(CPU_CHANGE_CORE);
+#endif
 }
 
 //*****************************************************************************
@@ -654,6 +662,37 @@ void CPU_HandleDynaRecOnBranch( bool backwards, bool trace_already_enabled )
 					gResetFragmentCache = true;
 				}
 			}
+		}
+
+		// Perform any pending full cache reset BEFORE LookupFragmentQ() so we never
+		// execute a stale compiled fragment after a large overlay/DMA invalidation
+		// (e.g. GoldenEye 007 mission loads) or code-buffer capacity reset.
+		if (gResetFragmentCache || gResetFragmentCacheForCapacity)
+		{
+			if (gTraceRecorder.IsTraceActive())
+			{
+				gTraceRecorder.AbortTrace();
+				change_core = true;
+			}
+			const bool isCapacity = gResetFragmentCacheForCapacity;
+#ifdef DAEDALUS_ENABLE_OS_HOOKS
+			if (isCapacity || gFragmentCache.GetCacheSize() >= gNumOfOSFunctions)
+#else
+			if (true)
+#endif
+			{
+#ifdef DAEDALUS_CTR_XRAY
+				PerfCTR::CountResetReason(isCapacity ? 0 : 1);
+#endif
+				gFragmentCache.Clear();
+				gHotTraceCountMap.clear();
+#ifdef DAEDALUS_ENABLE_OS_HOOKS
+				Patch_PatchAll();
+#endif
+			}
+			gResetFragmentCache = false;
+			gResetFragmentCacheForCapacity = false;
+			gPendingInvalCount = 0;
 		}
 
 		#ifdef DAEDALUS_ENABLE_DYNAREC_PROFILE

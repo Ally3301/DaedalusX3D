@@ -37,6 +37,12 @@
 .global _DynaRec_DIV
 .global _DynaRec_DIVU
 
+	.global _ReadFastPRead_u8
+	.global _ReadFastPRead_s8
+	.global _ReadFastPRead_u16
+	.global _ReadFastPRead_s16
+	.global _ReadFastPRead_u32
+
 	.global _ReadBitsDirect_u8
 	.global _ReadBitsDirect_s8
 	.global _ReadBitsDirect_u16
@@ -198,13 +204,47 @@ _ReturnFromDynaRecAndHandleException:
 	bl    HandleException_extern
 	pop   {r4-r12,pc}
 	
+#######################################################################################
+# Zero-flush fast pRead lookup for Buffer B dynamic loads (0x7F/0x70 GoldenEye, 0xA0 KSEG1):
+#   Input:  r0 = pre-swizzled N64 address
+#   Output: Z=0 (NE) on hit with r0 = loaded value; Z=1 (EQ) on miss with r0 preserved.
+#   Clobbers ONLY r2, r3 (preserves ALL cached GPRs r4-r12 and ALL VFP regs s0-s31!).
+.macro READ_FAST_PREAD function, load_instruction
+.type \function, %function
+\function:
+	lsr		r2, r0, #0x12
+	ldr		r3, =g_MemoryLookupTableRead
+	ldr		r3, [r3, r2, lsl #3]	// m.pRead
+	cmp		r3, #0
+	bxeq	lr						// Z=1 -> miss, r0 unchanged
+	add		r0, r3, r0
+	\load_instruction	r0, [r0]
+	tst		r3, r3					// r3 != 0 -> Z=0 (hit)
+	bx		lr
+.endm
+
+	READ_FAST_PREAD _ReadFastPRead_u8,  ldrb
+	READ_FAST_PREAD _ReadFastPRead_s8,  ldrsb
+	READ_FAST_PREAD _ReadFastPRead_u16, ldrh
+	READ_FAST_PREAD _ReadFastPRead_s16, ldrsh
+	READ_FAST_PREAD _ReadFastPRead_u32, ldr
+
 .macro READ_BITS	function, load_instruction
 \function:
-	// look up memread function
+	// Fast direct lookup via g_MemoryLookupTableRead[addr >> 18].pRead
+	// (handles GoldenEye 0x7F/0x70 TLB-hacked ROM/RAM, KSEG1 RDRAM 0xA0, etc.
+	// with zero C++ call, zero TLB miss, and matching Memory.h ReadAddress()).
 	lsr		r2, r0, #0x12
 	ldr		r3, =g_MemoryLookupTableRead
 	add		r2, r3, r2, lsl #3 // * 8 to index the two pointer struct
-	ldr		r2, [r2,#4]	//offset 4 to get the second pointer
+	ldr		r3, [r2, #0]	// m.pRead
+	cmp		r3, #0
+	beq		1f
+	add		r0, r3, r0
+	\load_instruction	r0, [r0]
+	bx		lr
+1:
+	ldr		r2, [r2,#4]	//offset 4 to get the second pointer (m.ReadFunc)
 	
 	str		r1, [r12,#_CurrentPC] 	// CurrentPC
 	
@@ -229,11 +269,18 @@ _ReturnFromDynaRecAndHandleException:
 
 .macro READ_BITS_BD	function, load_instruction
 \function:
-	// look up memread function
+	// Fast direct lookup via g_MemoryLookupTableRead[addr >> 18].pRead
 	lsr		r2, r0, #0x12
 	ldr		r3, =g_MemoryLookupTableRead
 	add		r2, r3, r2, lsl #3 // * 8 to index the two pointer struct
-	ldr		r2, [r2,#4]	//offset 4 to get the second pointer
+	ldr		r3, [r2, #0]	// m.pRead
+	cmp		r3, #0
+	beq		1f
+	add		r0, r3, r0
+	\load_instruction	r0, [r0]
+	bx		lr
+1:
+	ldr		r2, [r2,#4]	//offset 4 to get the second pointer (m.ReadFunc)
 	
 	str		r1, [r12,#_CurrentPC] 	// CurrentPC
 	

@@ -422,7 +422,7 @@ static u32 DLParser_ProcessDList(u32 instruction_limit)
 
 	while(gDlistStackPointer >= 0)
 	{
-		if (!DLParser_FetchNextCommand( &command ))
+		if (DAEDALUS_EXPECT_UNLIKELY(!DLParser_FetchNextCommand( &command )))
 			break;
 
 		DL_BEGIN_INSTR(current_instruction_count, command.inst.cmd0, command.inst.cmd1, gDlistStackPointer, gUcodeName[command.inst.cmd]);
@@ -445,15 +445,13 @@ static u32 DLParser_ProcessDList(u32 instruction_limit)
 		current_instruction_count++;
 #endif
 
-		// Check limit
-		if (gDlistStack.limit >= 0)
+		// Check limit (only used by DKR/JFG; almost always -1)
+		if (DAEDALUS_EXPECT_UNLIKELY(gDlistStack.limit >= 0))
 		{
 			if (--gDlistStack.limit < 0)
 			{
 				DL_PF("**EndDLInMem");
 				gDlistStackPointer--;
-				// limit is already reset to default -1 at this point
-				//gDlistStack.limit = -1;
 			}
 		}
 	}

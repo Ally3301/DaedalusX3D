@@ -33,6 +33,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 extern bool PSP_IS_SLIM;
 #endif
 #ifdef DAEDALUS_CTR
+#include <3ds.h>
 extern bool isN3DS;
 #endif
 
@@ -85,10 +86,18 @@ ROMFileCache::ROMFileCache()
 		CACHE_SIZE = 256;
 	}
 #elif defined(DAEDALUS_CTR)
-	// 16 KiB chunks cut SD card FSUSER IPC reads by 8x compared to 2 KiB chunks.
-	// Old 3DS uses a 3 MiB cache (192 chunks); New 3DS uses 4 MiB (256 chunks).
-	CHUNK_SIZE = 16 * 1024;
-	CACHE_SIZE = isN3DS ? 256 : 192;
+	// On real 3DS hardware, SDMC reads via fs:USER have high per-IPC latency (~0.5-1.5 ms).
+	// Using 32 KiB chunks cuts IPC calls in half compared to 16 KiB, and sizing the cache
+	// dynamically from the available process heap (4 MiB on small O3DS .3dsx heap, 8 MiB
+	// on large O3DS .cia heap, 12 MiB on N3DS) slashes SD thrashing in 24-32 MiB ROMs.
+	CHUNK_SIZE = 32 * 1024;
+	const u32 heap_cap = envGetHeapSize();
+	if (isN3DS)
+		CACHE_SIZE = 384; // 12 MiB
+	else if (heap_cap >= 56u * 1024u * 1024u)
+		CACHE_SIZE = 256; // 8 MiB
+	else
+		CACHE_SIZE = 128; // 4 MiB
 #else
 	CHUNK_SIZE = 2 * 1024;
 	CACHE_SIZE = 1024;
@@ -98,7 +107,15 @@ ROMFileCache::ROMFileCache()
 #ifdef DAEDALUS_ENABLE_ASSERTS
 	DAEDALUS_ASSERT( (1<<(sizeof(CacheIdx)*8)) > CACHE_SIZE, "Need to increase size of CacheIdx typedef to allow sufficient entries to be indexed" );
 #endif
-	mpStorage   = (u8*)CROMFileMemory::Get()->Alloc( STORAGE_BYTES );
+	mpStorage = (u8*)CROMFileMemory::Get()->Alloc( STORAGE_BYTES );
+#ifdef DAEDALUS_CTR
+	while (mpStorage == NULL && CACHE_SIZE > 64)
+	{
+		CACHE_SIZE >>= 1;
+		STORAGE_BYTES = CACHE_SIZE * CHUNK_SIZE;
+		mpStorage = (u8*)CROMFileMemory::Get()->Alloc( STORAGE_BYTES );
+	}
+#endif
 	mpChunkInfo = new (std::nothrow) SChunkInfo[ CACHE_SIZE ];
 }
 

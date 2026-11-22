@@ -42,7 +42,11 @@ static void * ReadMapped( u32 address )
 	u32 physical_addr {TLBEntry::Translate(address, missing)};
 	if (physical_addr != 0)
 	{
-		return g_pu8RamBase + (physical_addr & 0x007FFFFF);
+		if (physical_addr < 0x00800000u)
+			return g_pu8RamBase + physical_addr;
+		// Support TLB entries mapped to Cart ROM / non-RDRAM physical addresses
+		// (e.g. GoldenEye 007 when ROM is streamed instead of fixed in RAM).
+		return ReadAddress(0x80000000u | physical_addr);
 	}
 	else
 	{

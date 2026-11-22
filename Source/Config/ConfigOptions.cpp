@@ -30,7 +30,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 
 u32		gSpeedSyncEnabled			= 0;		// Enable to limit frame rate.
 bool	gDynarecEnabled				= true;		// Use dynamic recompilation
+#if defined(DAEDALUS_CTR)
+bool	gDynarecLoopOptimisation	= true;		// Enable the dynarec loop optimisation
+#else
 bool	gDynarecLoopOptimisation	= false;	// Enable the dynarec loop optmisation
+#endif
 bool	gDynarecDoublesOptimisation	= false;	// Enable the dynarec Doubles optmisation
 u32		gDynarecCycleMultiplier		= 1;		// 1 = accurate, 2 = 2x CPU cycle speed hack
 bool	gOSHooksEnabled				= true;		// Apply os-hooks

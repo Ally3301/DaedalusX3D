@@ -22,6 +22,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include <malloc.h>
 
 #ifdef DAEDALUS_CTR
+#include <3ds.h>
 #include "SysCTR/Utility/MemoryCTR.h"
 #endif
 
@@ -29,13 +30,16 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "Debug/DBGConsole.h"
 #include "CodeGeneratorARM.h"
 
-// Old 3DS uses a 6 MiB primary cache and 2 MiB secondary cache (for cold/slow
-// paths such as exceptions and memory fallbacks) so hot traces survive long
-// gameplay sessions without running out of process heap under 64 MiB .3dsx.
-static const u32 OLD3DS_PRIMARY_CODE_BUFFER_SIZE   = 6 * 1024 * 1024;
-static const u32 OLD3DS_SECONDARY_CODE_BUFFER_SIZE = 2 * 1024 * 1024;
-static const u32 NEW3DS_PRIMARY_CODE_BUFFER_SIZE   = 8 * 1024 * 1024;
-static const u32 NEW3DS_SECONDARY_CODE_BUFFER_SIZE = 2 * 1024 * 1024;
+// Size JIT primary (Buffer A) and secondary (Buffer B slow-path stubs) caches
+// dynamically from available process heap so .cia (80 MiB Old 3DS / 124 MiB New 3DS)
+// avoids mid-gameplay secondary-buffer capacity resets (e.g. GoldenEye 007), while
+// Old 3DS .3dsx (~48 MiB process heap) still retains generous RAM for ROMs & RDRAM.
+static const u32 OLD3DS_3DSX_PRIMARY_CODE_BUFFER_SIZE   = 6 * 1024 * 1024;
+static const u32 OLD3DS_3DSX_SECONDARY_CODE_BUFFER_SIZE = 3 * 1024 * 1024 + 512 * 1024;
+static const u32 OLD3DS_CIA_PRIMARY_CODE_BUFFER_SIZE    = 10 * 1024 * 1024;
+static const u32 OLD3DS_CIA_SECONDARY_CODE_BUFFER_SIZE  = 5 * 1024 * 1024;
+static const u32 NEW3DS_PRIMARY_CODE_BUFFER_SIZE        = 12 * 1024 * 1024;
+static const u32 NEW3DS_SECONDARY_CODE_BUFFER_SIZE      = 6 * 1024 * 1024;
 
 extern bool isN3DS;
 
@@ -95,8 +99,14 @@ bool	CCodeBufferManagerARM::Initialise()
 	mInitialiseError = 0;
 
 	#ifdef DAEDALUS_CTR
-	const u32 primary_size   = isN3DS ? NEW3DS_PRIMARY_CODE_BUFFER_SIZE   : OLD3DS_PRIMARY_CODE_BUFFER_SIZE;
-	const u32 secondary_size = isN3DS ? NEW3DS_SECONDARY_CODE_BUFFER_SIZE : OLD3DS_SECONDARY_CODE_BUFFER_SIZE;
+	const u32 heap_cap = envGetHeapSize();
+	const bool large_old3ds_heap = (heap_cap >= 60u * 1024u * 1024u);
+	const u32 primary_size = isN3DS
+		? NEW3DS_PRIMARY_CODE_BUFFER_SIZE
+		: (large_old3ds_heap ? OLD3DS_CIA_PRIMARY_CODE_BUFFER_SIZE : OLD3DS_3DSX_PRIMARY_CODE_BUFFER_SIZE);
+	const u32 secondary_size = isN3DS
+		? NEW3DS_SECONDARY_CODE_BUFFER_SIZE
+		: (large_old3ds_heap ? OLD3DS_CIA_SECONDARY_CODE_BUFFER_SIZE : OLD3DS_3DSX_SECONDARY_CODE_BUFFER_SIZE);
 	const u32 total_size     = primary_size + secondary_size;
 	mBufferSize = primary_size;
 	mSecondBufferSize = secondary_size;

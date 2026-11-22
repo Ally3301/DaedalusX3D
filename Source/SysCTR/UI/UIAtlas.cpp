@@ -186,13 +186,14 @@ void RasterizeIcons(uint32_t * pixels, UVRect outIcons[ICON_COUNT])
 				{
 				case ICON_CARTRIDGE:
 				{
-					// N64 cartridge silhouette with rounded top shoulders + recessed label window
-					const float body = SdRoundedBox(x, y + 0.5f, 7.6f, 6.2f, 2.2f);
-					const float topArc = SdRoundedBox(x, y - 3.0f, 5.2f, 4.2f, 2.8f);
-					const float outer = fminf(body, topArc);
-					const float label = SdRoundedBox(x, y - 0.8f, 4.4f, 3.0f, 0.8f);
-					const float notch = SdRoundedBox(x, y + 5.2f, 4.0f, 1.1f, 0.4f);
-					d = fmaxf(outer, -fminf(label, notch));
+					// N64 Game Pak silhouette: wide body, arched top, side vertical grooves, recessed center label
+					const float body   = SdRoundedBox(x, y + 1.0f, 7.8f, 5.8f, 1.6f);
+					const float arch   = SdRoundedBox(x, y - 1.2f, 7.4f, 5.2f, 3.6f);
+					const float outer  = fminf(body, arch);
+					const float label  = SdRoundedBox(x, y + 0.4f, 4.0f, 4.4f, 0.7f);
+					const float grooveL = SdSegment(x, y, -5.6f, -3.6f, -5.6f, 5.4f) - 0.45f;
+					const float grooveR = SdSegment(x, y,  5.6f, -3.6f,  5.6f, 5.4f) - 0.45f;
+					d = fmaxf(outer, -fminf(label, fminf(grooveL, grooveR)));
 					break;
 				}
 				case ICON_PLAY:
@@ -200,26 +201,24 @@ void RasterizeIcons(uint32_t * pixels, UVRect outIcons[ICON_COUNT])
 					break;
 				case ICON_SAVE:
 				{
-					// Downward arrow + bottom tray (matches CTR64 Save icon)
-					const float shaft = SdSegment(x, y, 0.0f, -6.8f, 0.0f, 2.2f) - 1.1f;
-					const float hL    = SdSegment(x, y, 0.0f, 2.4f, -3.8f, -1.2f) - 1.05f;
-					const float hR    = SdSegment(x, y, 0.0f, 2.4f,  3.8f, -1.2f) - 1.05f;
-					const float btm   = SdSegment(x, y, -6.5f, 6.2f, 6.5f, 6.2f) - 1.05f;
-					const float sideL = SdSegment(x, y, -6.5f, 2.5f, -6.5f, 6.2f) - 1.05f;
-					const float sideR = SdSegment(x, y,  6.5f, 2.5f,  6.5f, 6.2f) - 1.05f;
-					d = fminf(fminf(shaft, fminf(hL, hR)), fminf(btm, fminf(sideL, sideR)));
+					// N64 Controller Pak (Memory Pak) shell with top label window + downward save arrow
+					const float pak   = SdRoundedBox(x, y - 0.4f, 6.8f, 6.8f, 1.8f);
+					const float topW  = SdRoundedBox(x, y - 3.6f, 4.2f, 1.9f, 0.6f);
+					const float shaft = SdSegment(x, y, 0.0f, -0.2f, 0.0f, 3.8f) - 1.05f;
+					const float head  = SdTriangle(x, y, -3.4f, 2.4f, 3.4f, 2.4f, 0.0f, 6.4f) - 0.25f;
+					const float arrow = fminf(shaft, head);
+					d = fminf(fmaxf(pak, -fminf(topW, arrow - 0.9f)), arrow);
 					break;
 				}
 				case ICON_LOAD:
 				{
-					// Upward arrow + bottom tray (matches CTR64 Load icon)
-					const float shaft = SdSegment(x, y, 0.0f, -5.8f, 0.0f, 2.8f) - 1.1f;
-					const float hL    = SdSegment(x, y, 0.0f, -6.0f, -3.8f, -2.2f) - 1.05f;
-					const float hR    = SdSegment(x, y, 0.0f, -6.0f,  3.8f, -2.2f) - 1.05f;
-					const float btm   = SdSegment(x, y, -6.5f, 6.2f, 6.5f, 6.2f) - 1.05f;
-					const float sideL = SdSegment(x, y, -6.5f, 2.5f, -6.5f, 6.2f) - 1.05f;
-					const float sideR = SdSegment(x, y,  6.5f, 2.5f,  6.5f, 6.2f) - 1.05f;
-					d = fminf(fminf(shaft, fminf(hL, hR)), fminf(btm, fminf(sideL, sideR)));
+					// N64 Controller Pak (Memory Pak) shell with top label window + upward load arrow
+					const float pak   = SdRoundedBox(x, y + 0.4f, 6.8f, 6.8f, 1.8f);
+					const float topW  = SdRoundedBox(x, y - 3.2f, 4.2f, 1.8f, 0.6f);
+					const float shaft = SdSegment(x, y, 0.0f, 1.6f, 0.0f, 5.6f) - 1.05f;
+					const float head  = SdTriangle(x, y, -3.4f, 2.6f, 3.4f, 2.6f, 0.0f, -1.2f) - 0.25f;
+					const float arrow = fminf(shaft, head);
+					d = fminf(fmaxf(pak, -fminf(topW, arrow - 0.9f)), arrow);
 					break;
 				}
 				case ICON_AUDIO:
@@ -244,57 +243,57 @@ void RasterizeIcons(uint32_t * pixels, UVRect outIcons[ICON_COUNT])
 				}
 				case ICON_VIDEO:
 				{
-					// Monitor frame + stand (matches CTR64 Video icon)
-					const float outer = SdRoundedBox(x, y - 1.4f, 7.4f, 5.2f, 1.4f);
-					const float inner = SdRoundedBox(x, y - 1.4f, 5.5f, 3.3f, 0.6f);
-					const float frame = fmaxf(outer, -inner);
-					const float neck  = SdSegment(x, y, 0.0f, 3.8f, 0.0f, 6.4f) - 1.1f;
-					const float base  = SdSegment(x, y, -3.8f, 6.6f, 3.8f, 6.6f) - 1.0f;
-					d = fminf(frame, fminf(neck, base));
+					// Classic 4:3 CRT TV with rabbit-ear antenna and side tuner knobs
+					const float outer = SdRoundedBox(x, y + 1.0f, 7.4f, 5.4f, 1.8f);
+					const float inner = SdRoundedBox(x - 1.0f, y + 1.0f, 4.6f, 3.6f, 0.9f);
+					const float antL  = SdSegment(x, y, -0.8f, -4.2f, -3.8f, -7.2f) - 0.75f;
+					const float antR  = SdSegment(x, y,  0.8f, -4.2f,  3.8f, -7.2f) - 0.75f;
+					const float footL = SdSegment(x, y, -4.5f,  6.4f, -3.0f,  6.4f) - 0.8f;
+					const float footR = SdSegment(x, y,  3.0f,  6.4f,  4.5f,  6.4f) - 0.8f;
+					const float tv    = fmaxf(outer, -inner);
+					d = fminf(tv, fminf(fminf(antL, antR), fminf(footL, footR)));
 					break;
 				}
 				case ICON_CONTROLS:
 				{
-					// Gamepad silhouette with D-pad + two face buttons cutout
-					const float body = SdRoundedBox(x, y - 0.4f, 7.6f, 4.4f, 3.2f);
-					const float gripL = sqrtf((x + 5.2f) * (x + 5.2f) + (y - 3.0f) * (y - 3.0f)) - 2.6f;
-					const float gripR = sqrtf((x - 5.2f) * (x - 5.2f) + (y - 3.0f) * (y - 3.0f)) - 2.6f;
-					const float pad  = fminf(body, fminf(gripL, gripR));
-					const float dh   = SdSegment(x, y, -5.2f, -0.5f, -2.4f, -0.5f) - 0.75f;
-					const float dv   = SdSegment(x, y, -3.8f, -1.9f, -3.8f,  0.9f) - 0.75f;
-					const float b1   = sqrtf((x - 3.0f) * (x - 3.0f) + (y + 1.0f) * (y + 1.0f)) - 0.95f;
-					const float b2   = sqrtf((x - 5.2f) * (x - 5.2f) + (y - 0.6f) * (y - 0.6f)) - 0.95f;
-					d = fmaxf(pad, -fminf(fminf(dh, dv), fminf(b1, b2)));
+					// Authentic 3-Prong N64 Trident Controller silhouette
+					const float topBar = SdRoundedBox(x, y - 2.4f, 7.6f, 3.2f, 2.6f);
+					const float prongL = SdSegment(x, y, -5.8f, -1.5f, -5.2f, 5.2f) - 1.85f;
+					const float prongC = SdSegment(x, y,  0.0f, -0.5f,  0.0f, 6.4f) - 1.95f;
+					const float prongR = SdSegment(x, y,  5.8f, -1.5f,  5.2f, 5.2f) - 1.85f;
+					const float body   = fminf(topBar, fminf(prongC, fminf(prongL, prongR)));
+					const float stick  = sqrtf(x * x + (y - 1.2f) * (y - 1.2f)) - 1.25f;
+					const float dpadH  = SdSegment(x, y, -6.2f, -2.2f, -3.8f, -2.2f) - 0.65f;
+					const float dpadV  = SdSegment(x, y, -5.0f, -3.4f, -5.0f, -1.0f) - 0.65f;
+					const float btnA   = sqrtf((x - 4.4f) * (x - 4.4f) + (y + 1.8f) * (y + 1.8f)) - 0.9f;
+					const float btnB   = sqrtf((x - 5.8f) * (x - 5.8f) + (y + 3.0f) * (y + 3.0f)) - 0.9f;
+					d = fmaxf(body, -fminf(stick, fminf(fminf(dpadH, dpadV), fminf(btnA, btnB))));
 					break;
 				}
 				case ICON_RESET:
 				{
-					// Circular refresh arrow (matches CTR64 Reset icon)
 					const float r = sqrtf(x * x + y * y);
-					const float ang = atan2f(y, x); // [-pi, pi]
+					const float ang = atan2f(y, x);
 					float arc = fabsf(r - 5.6f) - 1.05f;
-					if (ang > -0.75f && ang < 0.25f) arc = 10.0f; // small gap top-right
+					if (ang > -0.75f && ang < 0.25f) arc = 10.0f;
 					const float head = SdTriangle(x, y, 5.2f, -5.6f, 6.2f, -1.6f, 2.0f, -2.4f) - 0.2f;
 					d = fminf(arc, head);
 					break;
 				}
 				case ICON_GRID:
 				{
-					// 2x2 rounded squares (matches CTR64 Game list icon)
-					const float tl = SdRoundedBox(x + 3.6f, y + 3.6f, 2.6f, 2.6f, 0.8f);
-					const float tr = SdRoundedBox(x - 3.6f, y + 3.6f, 2.6f, 2.6f, 0.8f);
-					const float bl = SdRoundedBox(x + 3.6f, y - 3.6f, 2.6f, 2.6f, 0.8f);
-					const float br = SdRoundedBox(x - 3.6f, y - 3.6f, 2.6f, 2.6f, 0.8f);
-					d = fminf(fminf(tl, tr), fminf(bl, br));
+					// Authentic 3x3 Nintendo 3DS Home Menu Grid (9 rounded mini-tiles)
+					const float gx = fabsf(x) > 2.4f ? (fabsf(x) - 4.8f) : x;
+					const float gy = fabsf(y) > 2.4f ? (fabsf(y) - 4.8f) : y;
+					d = SdRoundedBox(gx, gy, 1.75f, 1.75f, 0.55f);
 					break;
 				}
 				case ICON_POWER:
 				{
-					// Power symbol (matches CTR64 Exit icon)
 					const float r = sqrtf(x * x + y * y);
 					const float ang = atan2f(y, x);
 					float arc = fabsf(r - 5.8f) - 1.05f;
-					if (ang > -2.18f && ang < -0.96f) arc = 10.0f; // top gap
+					if (ang > -2.18f && ang < -0.96f) arc = 10.0f;
 					const float stem = SdSegment(x, y, 0.0f, -7.2f, 0.0f, -0.8f) - 1.05f;
 					d = fminf(arc, stem);
 					break;
@@ -302,9 +301,8 @@ void RasterizeIcons(uint32_t * pixels, UVRect outIcons[ICON_COUNT])
 				case ICON_STAR:
 				case ICON_STAR_OUTLINE:
 				{
-					// 5-pointed star via polar distance approximation
 					const float r = sqrtf(x * x + y * y);
-					const float a = atan2f(y, x) + 1.5707963f; // point up
+					const float a = atan2f(y, x) + 1.5707963f;
 					const float sector = fmodf(fabsf(a), 1.2566371f);
 					const float t = fabsf(sector - 0.6283185f) / 0.6283185f;
 					const float starR = 3.2f + 4.4f * (t * t);
@@ -314,12 +312,16 @@ void RasterizeIcons(uint32_t * pixels, UVRect outIcons[ICON_COUNT])
 				}
 				case ICON_GEAR:
 				{
-					const float r = sqrtf(x * x + y * y);
-					const float a = atan2f(y, x);
-					const float tooth = 5.7f + 1.4f * cosf(a * 6.0f);
-					const float outer = r - tooth;
-					const float hole  = 2.6f - r;
-					d = fmaxf(outer, hole);
+					// Nintendo 3DS System Settings diagonal wrench + mini gear
+					const float shaft = SdSegment(x, y, -5.6f, 5.6f, 2.6f, -2.6f) - 1.45f;
+					const float head  = sqrtf((x - 3.6f) * (x - 3.6f) + (y + 3.6f) * (y + 3.6f)) - 3.4f;
+					const float jaw   = SdSegment(x, y, 3.2f, -3.2f, 6.6f, -6.6f) - 1.25f;
+					const float wrench = fmaxf(fminf(shaft, head), -jaw);
+					const float gx = x - 3.4f, gy = y - 3.4f;
+					const float gr = sqrtf(gx * gx + gy * gy);
+					const float ga = atan2f(gy, gx);
+					const float gear = fmaxf(gr - (2.8f + 0.65f * cosf(ga * 6.0f)), 1.1f - gr);
+					d = fminf(wrench, gear);
 					break;
 				}
 				case ICON_CHEVRON_LEFT:

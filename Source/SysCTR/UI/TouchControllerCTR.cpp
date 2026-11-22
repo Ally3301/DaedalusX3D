@@ -501,179 +501,184 @@ void DrawBottomHudNow()
 		return;
 	}
 
-	// 2. Opaque matte background quad (replaces GX_MemoryFill so zero C3D_FrameSplit occurs!)
-	Quad(0.0f, 0.0f, 320.0f, 240.0f, t.bg);
+	// 2. Minimalist dark Virtual Console slate canvas during gameplay (zero glare, zero C3D_FrameSplit)
+	const uint32_t hudBg     = RGBA(18, 22, 30);
+	const uint32_t hudHeader = RGBA(13, 16, 22);
+	const uint32_t hudCard   = RGBA(28, 34, 46);
+	const uint32_t hudAlt    = RGBA(22, 27, 37);
+	const uint32_t hudBorder = RGBA(46, 56, 74);
+	const uint32_t hudText   = RGBA(238, 242, 250);
+	const uint32_t hudMuted  = RGBA(142, 154, 174);
+	const uint32_t hudDim    = RGBA(92, 102, 120);
+	const uint32_t hudCyan   = RGBA(0, 212, 248);
 
-	// 3. Compact Top HUD Strip (y = 0..27)
-	Quad(0.0f, 0.0f, 320.0f, 27.0f, t.headerBg);
-	Quad(0.0f, 27.0f, 320.0f, 1.0f, t.headerRule);
+	Quad(0.0f, 0.0f, 320.0f, 240.0f, hudBg);
 
-	// Live FPS pill
+	// 3. Minimalist Top Status Bar (y = 0..27)
+	Quad(0.0f, 0.0f, 320.0f, 27.0f, hudHeader);
+	Quad(0.0f, 27.0f, 320.0f, 1.0f, hudBorder);
+
+	// Live FPS pill (x = 6..68)
 	char fpsBuf[20];
 	const float fps = gCurrentFramerate;
 	snprintf(fpsBuf, sizeof(fpsBuf), "%.1f FPS", fps);
 	const uint32_t fpsCol = (fps >= 19.0f) ? t.n64Green : ((fps >= 13.0f) ? t.n64Yellow : t.n64Red);
-	RoundedRect(6.0f, 4.0f, 62.0f, 19.0f, 6.0f, WithAlpha(fpsCol, 34));
-	RoundedBorder1(6.0f, 4.0f, 62.0f, 19.0f, 6.0f, fpsCol);
+	RoundedRect(6.0f, 4.0f, 62.0f, 19.0f, 9.0f, WithAlpha(fpsCol, 36));
+	RoundedBorder1(6.0f, 4.0f, 62.0f, 19.0f, 9.0f, fpsCol);
 	TextCentered(FONT_BODY, 37.0f, 7.0f, fpsBuf, fpsCol, 0.82f);
 
 	// Mute toggle icon button (x = 72..102)
 	const bool muted = (gAudioPluginEnabled == APM_DISABLED);
 	const int topBtn = s_engine.PressedTopBarBtn();
-	RoundedRect(72.0f, 4.0f, 30.0f, 19.0f, 6.0f,
-	            (topBtn == 0) ? t.focusFill : (muted ? WithAlpha(t.n64Red, 36) : t.cardBgAlt));
+	RoundedRect(72.0f, 4.0f, 30.0f, 19.0f, 7.0f,
+	            (topBtn == 0) ? WithAlpha(hudCyan, 48) : (muted ? WithAlpha(t.n64Red, 36) : hudCard));
 	Icon(muted ? ICON_AUDIO_MUTE : ICON_AUDIO, 80.0f, 6.5f, 14.0f,
-	     muted ? t.n64Red : t.accent);
+	     muted ? t.n64Red : hudMuted);
 
-	// Battery icon (x = 109..129)
-	DrawBatteryIcon(110.0f, 9.0f, s_batteryLevel, s_charging, t.textMuted);
+	// Slot indicator badge (x = 106..142)
+	char slotPill[16];
+	snprintf(slotPill, sizeof(slotPill), "S%d", s_activeSlot + 1);
+	RoundedRect(106.0f, 4.0f, 34.0f, 19.0f, 7.0f, hudCard);
+	RoundedBorder1(106.0f, 4.0f, 34.0f, 19.0f, 7.0f, hudBorder);
+	TextCentered(FONT_BODY, 123.0f, 7.0f, slotPill, hudText, 0.80f);
 
 	// Mode switch pill (x = 146..234)
-	RoundedRect(146.0f, 4.0f, 88.0f, 19.0f, 6.0f, (topBtn == 1) ? t.focusFill : t.cardBg);
-	RoundedBorder1(146.0f, 4.0f, 88.0f, 19.0f, 6.0f, (topBtn == 1) ? t.focusBorder : t.cardBorder);
-	Icon(ICON_CONTROLS, 152.0f, 6.5f, 14.0f, t.accent);
-	Text(FONT_BODY, 170.0f, 7.0f, TouchPadEngine::LayoutShortName(cfg.layout), t.text, 0.82f);
+	RoundedRect(146.0f, 4.0f, 88.0f, 19.0f, 9.0f, (topBtn == 1) ? WithAlpha(hudCyan, 40) : hudCard);
+	RoundedBorder1(146.0f, 4.0f, 88.0f, 19.0f, 9.0f, (topBtn == 1) ? hudCyan : hudBorder);
+	Icon(ICON_CONTROLS, 153.0f, 6.5f, 14.0f, hudCyan);
+	Text(FONT_BODY, 171.0f, 7.0f, TouchPadEngine::LayoutShortName(cfg.layout), hudText, 0.80f);
 
 	// Sleep / Moon button (x = 238..268)
-	RoundedRect(238.0f, 4.0f, 30.0f, 19.0f, 6.0f, (topBtn == 2) ? t.focusFill : t.cardBg);
-	RoundedBorder1(238.0f, 4.0f, 30.0f, 19.0f, 6.0f, (topBtn == 2) ? t.focusBorder : t.cardBorder);
-	Icon(ICON_MOON, 246.0f, 6.5f, 14.0f, t.textMuted);
+	RoundedRect(238.0f, 4.0f, 30.0f, 19.0f, 7.0f, (topBtn == 2) ? WithAlpha(hudCyan, 40) : hudCard);
+	RoundedBorder1(238.0f, 4.0f, 30.0f, 19.0f, 7.0f, (topBtn == 2) ? hudCyan : hudBorder);
+	Icon(ICON_MOON, 246.0f, 6.5f, 14.0f, hudMuted);
 
-	// Pause Menu button (x = 272..314)
-	RoundedRect(272.0f, 4.0f, 42.0f, 19.0f, 6.0f, (topBtn == 3) ? t.focusFill : t.cardBg);
-	RoundedBorder1(272.0f, 4.0f, 42.0f, 19.0f, 6.0f, (topBtn == 3) ? t.focusBorder : t.cardBorder);
-	Icon(ICON_MENU, 286.0f, 6.5f, 14.0f, t.text);
+	// Pause Menu pill button (x = 272..314)
+	RoundedRect(272.0f, 4.0f, 42.0f, 19.0f, 9.0f, (topBtn == 3) ? WithAlpha(hudCyan, 40) : hudCard);
+	RoundedBorder1(272.0f, 4.0f, 42.0f, 19.0f, 9.0f, (topBtn == 3) ? hudCyan : hudBorder);
+	TextCentered(FONT_BODY, 293.0f, 7.0f, "Pause", hudText, 0.78f);
 
-	// 4. Auxiliary Column: Dedicated Z Trigger, Z-Lock, Quick Save (QS), Quick Load (QL)
+	// 4. Minimalist Left Auxiliary Column: Z Trigger, Z-Lock slider switch, Quick Save/Load
 	const DeckLayout deck = ComputeDeck(cfg.leftHanded);
 	const bool zAct = s_engine.IsZActive();
-	DrawCard(deck.zX, deck.zY, deck.zW, deck.zH, zAct, false, t, 12.0f);
-	TextCentered(FONT_TITLE, deck.zX + deck.zW * 0.5f, deck.zY + 18.0f, "Z",
-	             zAct ? t.accent : t.text, 1.55f);
-	TextCentered(FONT_BODY, deck.zX + deck.zW * 0.5f, deck.zY + 52.0f,
-	             s_engine.IsZLatched() ? "LOCKED" : "TRIGGER",
-	             s_engine.IsZLatched() ? t.n64Green : t.textDim, 0.80f);
+	if (zAct)
+		RoundedRect(deck.zX - 2.0f, deck.zY - 2.0f, deck.zW + 4.0f, deck.zH + 4.0f, 15.0f, WithAlpha(hudCyan, 58));
+	RoundedRect(deck.zX, deck.zY, deck.zW, deck.zH, 13.0f, zAct ? RGBA(22, 48, 66) : hudCard);
+	if (zAct)
+		RoundedBorder2(deck.zX, deck.zY, deck.zW, deck.zH, 13.0f, hudCyan);
+	else
+		RoundedBorder1(deck.zX, deck.zY, deck.zW, deck.zH, 13.0f, hudBorder);
+	TextCentered(FONT_TITLE, deck.zX + deck.zW * 0.5f, deck.zY + 26.0f, "Z",
+	             zAct ? hudCyan : hudText, 1.50f);
 
-	// Z-Lock toggle pill
+	// Minimalist sliding pill toggle for Z-Lock
 	const bool zLock = s_engine.IsZLatched();
-	DrawCard(deck.zLockX, deck.zLockY, deck.zLockW, deck.zLockH, zLock, false, t, 8.0f);
-	Circle(deck.zLockX + 14.0f, deck.zLockY + deck.zLockH * 0.5f, 4.0f,
-	       zLock ? t.n64Green : t.textDim);
-	Text(FONT_BODY, deck.zLockX + 24.0f, deck.zLockY + 6.5f, "Z-Lock",
-	     zLock ? t.text : t.textMuted, 0.86f);
+	RoundedRect(deck.zLockX, deck.zLockY + 3.0f, 34.0f, 20.0f, 10.0f, zLock ? WithAlpha(hudCyan, 64) : hudAlt);
+	RoundedBorder1(deck.zLockX, deck.zLockY + 3.0f, 34.0f, 20.0f, 10.0f, zLock ? hudCyan : hudBorder);
+	Circle(deck.zLockX + (zLock ? 24.0f : 10.0f), deck.zLockY + 13.0f, 7.0f, zLock ? hudCyan : hudMuted);
+	Text(FONT_BODY, deck.zLockX + 40.0f, deck.zLockY + 6.5f, "Z-Lock",
+	     zLock ? hudText : hudMuted, 0.82f);
 
-	// QS & QL buttons with hold-to-confirm fill bar
+	// Clean Memory Pak Quick Save & Quick Load tiles
 	auto DrawQuickBtn = [&](float x, float y, float w, float h, EIconId icon,
 	                        const char * label, float prog) {
-		DrawCard(x, y, w, h, prog > 0.01f, false, t, 9.0f);
+		RoundedRect(x, y, w, h, 10.0f, prog > 0.01f ? RGBA(22, 48, 66) : hudCard);
+		RoundedBorder1(x, y, w, h, 10.0f, prog > 0.01f ? hudCyan : hudBorder);
 		if (prog > 0.01f)
 		{
 			const float fillW = (w - 8.0f) * prog;
-			RoundedRect(x + 4.0f, y + h - 8.0f, fillW, 4.0f, 2.0f, t.accent);
+			RoundedRect(x + 4.0f, y + h - 7.0f, fillW, 3.0f, 1.5f, hudCyan);
 		}
-		Icon(icon, x + (w - 16.0f) * 0.5f, y + 8.0f, 16.0f, prog > 0.01f ? t.accent : t.textMuted);
-		TextCentered(FONT_BODY, x + w * 0.5f, y + 29.0f, label, t.text, 0.84f);
+		Icon(icon, x + (w - 18.0f) * 0.5f, y + 8.0f, 18.0f, prog > 0.01f ? hudCyan : hudMuted);
+		TextCentered(FONT_BODY, x + w * 0.5f, y + 31.0f, label, hudMuted, 0.78f);
 	};
 	DrawQuickBtn(deck.qsX, deck.qsY, deck.qsW, deck.qsH, ICON_SAVE, "Save", s_engine.QuickSaveProgress());
 	DrawQuickBtn(deck.qlX, deck.qlY, deck.qlW, deck.qlH, ICON_LOAD, "Load", s_engine.QuickLoadProgress());
 
-	// 5. Right (or mirrored) Primary Control Cluster: C-Cross / C-Stick / Shooter / D-Pad
+	// 5. Minimalist Right C-Camera Pad: clean recessed well + 4 crisp N64 Yellow C-Buttons
 	const float cx = deck.padCx;
 	const float cy = deck.padCy;
 	const uint32_t dirs = s_engine.ActiveDirMask();
 
-	// Recessed circular well behind the camera/C cluster
-	Circle(cx, cy + 2.0f, 84.0f, t.cardShadow);
-	Circle(cx, cy, 83.0f, t.cardBg);
-	Ring(cx, cy, 82.0f, s_engine.IsStickCaptured() ? WithAlpha(t.accent, 180) : t.cardBorder);
+	Circle(cx, cy, 76.0f, hudAlt);
+	Ring(cx, cy, 76.0f, s_engine.IsStickCaptured() ? WithAlpha(hudCyan, 180) : hudBorder);
 
 	if (cfg.layout == TOUCH_LAYOUT_CCROSS)
 	{
-		// Authentic 4-way N64 Yellow C-Buttons Cross (User's preferred default!)
 		struct CBtnDef { float ox, oy; uint32_t mask; EIconId arrow; };
 		static const CBtnDef kCBtns[4] = {
-			{   0.0f, -49.0f, N64Mask::kCUp,    ICON_ARROW_UP    },
-			{   0.0f,  49.0f, N64Mask::kCDown,  ICON_ARROW_DOWN  },
-			{ -49.0f,   0.0f, N64Mask::kCLeft,  ICON_ARROW_LEFT  },
-			{  49.0f,   0.0f, N64Mask::kCRight, ICON_ARROW_RIGHT },
+			{   0.0f, -45.0f, N64Mask::kCUp,    ICON_ARROW_UP    },
+			{   0.0f,  45.0f, N64Mask::kCDown,  ICON_ARROW_DOWN  },
+			{ -45.0f,   0.0f, N64Mask::kCLeft,  ICON_ARROW_LEFT  },
+			{  45.0f,   0.0f, N64Mask::kCRight, ICON_ARROW_RIGHT },
 		};
-		// Subtle center "C" emblem
-		Circle(cx, cy, 15.0f, t.cardBgAlt);
-		TextCentered(FONT_BODY, cx, cy - 6.0f, "C", t.textDim, 0.90f);
+		// Minimalist center camera dot
+		Circle(cx, cy, 5.0f, hudBorder);
+		Circle(cx, cy, 2.5f, hudMuted);
 
 		for (int i = 0; i < 4; ++i)
 		{
 			const float bx = cx + kCBtns[i].ox;
 			const float by = cy + kCBtns[i].oy;
 			const bool active = (dirs & kCBtns[i].mask) != 0;
-			const uint32_t fillCol = active ? RGBA(255, 224, 72) : t.n64Yellow;
+			const uint32_t fillCol = active ? RGBA(255, 224, 68) : RGBA(240, 190, 22);
 
-			Circle(bx, by + 2.0f, 26.0f, t.cardShadow);
+			Circle(bx, by + 1.5f, 22.5f, RGBA(0, 0, 0, 90));
 			if (active)
-				Circle(bx, by, 29.0f, WithAlpha(t.focusBorder, 120));
-			Circle(bx, by, 25.5f, fillCol);
-			Ring(bx, by, 25.0f, active ? RGBA(255, 255, 255, 230) : RGBA(185, 138, 12, 160));
-			Icon(kCBtns[i].arrow, bx - 9.0f, by - 9.0f, 18.0f,
-			     active ? RGBA(255, 255, 255) : RGBA(110, 78, 8, 220));
+				Circle(bx, by, 25.0f, WithAlpha(hudCyan, 110));
+			Circle(bx, by, 22.0f, fillCol);
+			Icon(kCBtns[i].arrow, bx - 7.5f, by - 7.5f, 15.0f,
+			     active ? RGBA(20, 24, 30) : RGBA(42, 34, 12, 235));
 		}
 	}
 	else if (cfg.layout == TOUCH_LAYOUT_CSTICK || cfg.layout == TOUCH_LAYOUT_DUAL_SHOOTER)
 	{
-		// Smooth Virtual Analog Stick (C-Stick Camera OR Dual-Analog Shooter)
 		const bool isShooter = (cfg.layout == TOUCH_LAYOUT_DUAL_SHOOTER);
-		const uint32_t ringCol = isShooter ? t.accent : t.n64Yellow;
+		const uint32_t ringCol = isShooter ? hudCyan : t.n64Yellow;
 
-		// Inner track + cardinal direction pips
-		Circle(cx, cy, 62.0f, t.cardBgAlt);
-		Ring(cx, cy, 62.0f, WithAlpha(ringCol, s_engine.IsStickCaptured() ? 220 : 110));
+		Circle(cx, cy, 56.0f, hudBg);
+		Ring(cx, cy, 56.0f, WithAlpha(ringCol, s_engine.IsStickCaptured() ? 210 : 95));
 
-		Icon(ICON_ARROW_UP,    cx - 7.0f,  cy - 76.0f, 14.0f, (dirs & N64Mask::kCUp)    ? ringCol : t.textDim);
-		Icon(ICON_ARROW_DOWN,  cx - 7.0f,  cy + 62.0f, 14.0f, (dirs & N64Mask::kCDown)  ? ringCol : t.textDim);
-		Icon(ICON_ARROW_LEFT,  cx - 76.0f, cy - 7.0f,  14.0f, (dirs & N64Mask::kCLeft)  ? ringCol : t.textDim);
-		Icon(ICON_ARROW_RIGHT, cx + 62.0f, cy - 7.0f,  14.0f, (dirs & N64Mask::kCRight) ? ringCol : t.textDim);
+		Icon(ICON_ARROW_UP,    cx - 6.0f,  cy - 70.0f, 12.0f, (dirs & N64Mask::kCUp)    ? ringCol : hudDim);
+		Icon(ICON_ARROW_DOWN,  cx - 6.0f,  cy + 58.0f, 12.0f, (dirs & N64Mask::kCDown)  ? ringCol : hudDim);
+		Icon(ICON_ARROW_LEFT,  cx - 70.0f, cy - 6.0f,  12.0f, (dirs & N64Mask::kCLeft)  ? ringCol : hudDim);
+		Icon(ICON_ARROW_RIGHT, cx + 58.0f, cy - 6.0f,  12.0f, (dirs & N64Mask::kCRight) ? ringCol : hudDim);
 
-		// Floating thumbstick knob
-		const float kx = cx + s_engine.StickVisX() * 44.0f;
-		const float ky = cy - s_engine.StickVisY() * 44.0f;
-		Circle(kx, ky + 3.0f, 27.0f, t.cardShadow);
-		if (s_engine.IsStickCaptured())
-			Circle(kx, ky, 30.0f, WithAlpha(ringCol, 90));
-		Circle(kx, ky, 26.0f, s_engine.IsStickCaptured() ? ringCol : t.cardBg);
-		Ring(kx, ky, 25.0f, s_engine.IsStickCaptured() ? RGBA(255, 255, 255, 220) : ringCol);
+		const float kx = cx + s_engine.StickVisX() * 40.0f;
+		const float ky = cy - s_engine.StickVisY() * 40.0f;
+		Circle(kx, ky + 2.0f, 24.0f, RGBA(0, 0, 0, 95));
+		Circle(kx, ky, 23.5f, s_engine.IsStickCaptured() ? ringCol : hudCard);
+		Ring(kx, ky, 23.0f, s_engine.IsStickCaptured() ? RGBA(255, 255, 255, 220) : ringCol);
 		TextCentered(FONT_BODY, kx, ky - 6.0f, isShooter ? "AIM" : "C",
-		             s_engine.IsStickCaptured() ? RGBA(20, 24, 30) : t.textMuted, 0.88f);
+		             s_engine.IsStickCaptured() ? RGBA(20, 24, 30) : hudMuted, 0.84f);
 	}
 	else if (cfg.layout == TOUCH_LAYOUT_DPAD)
 	{
-		// Classic N64 D-Pad Cross
-		const uint32_t baseCol = t.isLight ? RGBA(108, 114, 126) : RGBA(72, 78, 90);
-		RoundedRect(cx - 21.0f, cy - 66.0f, 42.0f, 132.0f, 8.0f, baseCol);
-		RoundedRect(cx - 66.0f, cy - 21.0f, 132.0f, 42.0f, 8.0f, baseCol);
-		Circle(cx, cy, 12.0f, WithAlpha(t.bg, 120));
+		RoundedRect(cx - 19.0f, cy - 60.0f, 38.0f, 120.0f, 7.0f, hudCard);
+		RoundedRect(cx - 60.0f, cy - 19.0f, 120.0f, 38.0f, 7.0f, hudCard);
+		Circle(cx, cy, 10.0f, hudAlt);
 
-		if (dirs & N64Mask::kDUp)    RoundedRect(cx - 19.0f, cy - 64.0f, 38.0f, 42.0f, 6.0f, t.accent);
-		if (dirs & N64Mask::kDDown)  RoundedRect(cx - 19.0f, cy + 22.0f, 38.0f, 42.0f, 6.0f, t.accent);
-		if (dirs & N64Mask::kDLeft)  RoundedRect(cx - 64.0f, cy - 19.0f, 42.0f, 38.0f, 6.0f, t.accent);
-		if (dirs & N64Mask::kDRight) RoundedRect(cx + 22.0f, cy - 19.0f, 42.0f, 38.0f, 6.0f, t.accent);
+		if (dirs & N64Mask::kDUp)    RoundedRect(cx - 17.0f, cy - 58.0f, 34.0f, 38.0f, 5.0f, hudCyan);
+		if (dirs & N64Mask::kDDown)  RoundedRect(cx - 17.0f, cy + 20.0f, 34.0f, 38.0f, 5.0f, hudCyan);
+		if (dirs & N64Mask::kDLeft)  RoundedRect(cx - 58.0f, cy - 17.0f, 38.0f, 34.0f, 5.0f, hudCyan);
+		if (dirs & N64Mask::kDRight) RoundedRect(cx + 20.0f, cy - 17.0f, 38.0f, 34.0f, 5.0f, hudCyan);
 
-		Icon(ICON_ARROW_UP,    cx - 8.0f,  cy - 52.0f, 16.0f, RGBA(240, 244, 250, 220));
-		Icon(ICON_ARROW_DOWN,  cx - 8.0f,  cy + 36.0f, 16.0f, RGBA(240, 244, 250, 220));
-		Icon(ICON_ARROW_LEFT,  cx - 52.0f, cy - 8.0f,  16.0f, RGBA(240, 244, 250, 220));
-		Icon(ICON_ARROW_RIGHT, cx + 36.0f, cy - 8.0f,  16.0f, RGBA(240, 244, 250, 220));
+		Icon(ICON_ARROW_UP,    cx - 7.0f,  cy - 47.0f, 14.0f, hudText);
+		Icon(ICON_ARROW_DOWN,  cx - 7.0f,  cy + 33.0f, 14.0f, hudText);
+		Icon(ICON_ARROW_LEFT,  cx - 47.0f, cy - 7.0f,  14.0f, hudText);
+		Icon(ICON_ARROW_RIGHT, cx + 33.0f, cy - 7.0f,  14.0f, hudText);
 	}
 
-	// 6. Subtle Bottom Status / Toast Strip (y = 220..240)
+	// 6. Minimalist Bottom Toast / Whisper Hint Strip (y = 220..240)
 	if (s_toastFrames > 0 && s_toast[0])
 	{
-		RoundedRect(54.0f, 217.0f, 212.0f, 20.0f, 8.0f, WithAlpha(t.hintBg, 235));
-		RoundedBorder1(54.0f, 217.0f, 212.0f, 20.0f, 8.0f, t.accent);
-		TextCentered(FONT_BODY, 160.0f, 220.5f, s_toast, t.hintText, 0.82f);
+		RoundedRect(54.0f, 217.0f, 212.0f, 20.0f, 8.0f, RGBA(12, 15, 22, 238));
+		RoundedBorder1(54.0f, 217.0f, 212.0f, 20.0f, 8.0f, hudCyan);
+		TextCentered(FONT_BODY, 160.0f, 220.5f, s_toast, hudText, 0.82f);
 	}
 	else
 	{
-		char foot[64];
-		snprintf(foot, sizeof(foot), "Slot %d  |  Hold Save/Load 0.35s  |  SELECT: Pause", s_activeSlot);
-		TextCentered(FONT_BODY, 160.0f, 223.0f, foot, t.textDim, 0.78f);
+		TextCentered(FONT_BODY, 160.0f, 223.0f, "Hold Save/Load 0.35s  •  SELECT: Pause", hudDim, 0.76f);
 	}
 }
 

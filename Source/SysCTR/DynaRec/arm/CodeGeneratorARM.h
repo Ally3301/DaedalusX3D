@@ -137,6 +137,14 @@ class CCodeGeneratorARM : public CCodeGenerator, public CAssemblyWriterARM
 				bool mQuickLoad;
 				bool mFloatCMPIsValid;
 				bool mMultIsValid;
+				u32  mVerifiedRdramMask;
+				EN64Reg mR0HostBase;
+
+				inline void InvalidateBaseTracking()
+				{
+					mVerifiedRdramMask = 0;
+					mR0HostBase = N64Reg_R0;
+				}
 
 	private:
 				inline bool IsSignExtended32( EN64Reg reg ) const

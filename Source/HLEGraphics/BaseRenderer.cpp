@@ -182,6 +182,9 @@ BaseRenderer::BaseRenderer()
 
 ,	mPrimDepth( 0.0f )
 ,	mPrimLODFraction( 0.f )
+#ifdef DAEDALUS_CTR
+,	mPrimLODByte( 0 )
+#endif
 
 ,	mFogColour(0x00ffffff)			// NB top bits not set. Intentional?
 ,	mPrimitiveColour(0xffffffff)
@@ -219,6 +222,9 @@ BaseRenderer::BaseRenderer()
 		mTexWrap[i].u = 0;
 		mTexWrap[i].v = 0;
 		mActiveTile[i] = 0;
+#ifdef DAEDALUS_CTR
+		mBoundTileGen[i] = 0;
+#endif
 	}
 	memset( &mTnL, 0, sizeof(mTnL) );
 	
@@ -335,6 +341,9 @@ void BaseRenderer::EndScene()
 	{
 		mBoundTextureInfo[ i ] = TextureInfo();
 		mBoundTexture[ i ]     = nullptr;
+#ifdef DAEDALUS_CTR
+		mBoundTileGen[ i ]     = 0;
+#endif
 	}
 }
 
@@ -503,6 +512,7 @@ bool BaseRenderer::TestVerts(u32 v0, u32 vn) const
 //*****************************************************************************
 // Returns true if triangle visible and rendered, false otherwise
 //*****************************************************************************
+#ifndef DAEDALUS_CTR
 bool BaseRenderer::AddTri(u32 v0, u32 v1, u32 v2)
 {
 	//DAEDALUS_PROFILE( "BaseRenderer::AddTri" );
@@ -586,11 +596,10 @@ bool BaseRenderer::AddTri(u32 v0, u32 v1, u32 v2)
 		DAEDALUS_ERROR("Array overflow, too many Indices");
 	}
 
-#ifndef DAEDALUS_CTR
 	mVtxClipFlagsUnion |= f0 | f1 | f2;
-#endif
 	return true;
 }
+#endif
 
 //*****************************************************************************
 //
@@ -1010,25 +1019,28 @@ void BaseRenderer::PrepareTrisUnclipped( TempVerts * temp_verts ) const
 		{
 			for( u32 i = 0; i < num_vertices; ++i )
 			{
+				if (i + 2 < num_vertices)
+					__builtin_prefetch(&src[idx_buf[i + 2]], 0, 0);
 				const DaedalusVtx4 & v = src[ idx_buf[ i ] ];
-				dst[ i ].Texture.x  = v.Texture.x * scale_x - off_x;
-				dst[ i ].Texture.y  = v.Texture.y * scale_y - off_y;
-				dst[ i ].Colour     = c32( v.Pad );
-				dst[ i ].Position.x = v.TransformedPos.x;
-				dst[ i ].Position.y = v.TransformedPos.y;
-				dst[ i ].Position.z = v.TransformedPos.z;
+				DaedalusVtx & d = dst[ i ];
+				d.Texture.x = v.Texture.x * scale_x - off_x;
+				d.Texture.y = v.Texture.y * scale_y - off_y;
+				d.Colour    = c32( v.Pad );
+				// Integer 3-word copy avoids VFP register pressure while VFP computes UV scale.
+				memcpy(static_cast<void *>(&d.Position), &v.TransformedPos, 12);
 			}
 		}
 		else
 		{
 			for( u32 i = 0; i < num_vertices; ++i )
 			{
+				if (i + 2 < num_vertices)
+					__builtin_prefetch(&src[idx_buf[i + 2]], 0, 0);
 				const DaedalusVtx4 & v = src[ idx_buf[ i ] ];
-				dst[ i ].Texture    = v.Texture;
-				dst[ i ].Colour     = c32( v.Pad );
-				dst[ i ].Position.x = v.TransformedPos.x;
-				dst[ i ].Position.y = v.TransformedPos.y;
-				dst[ i ].Position.z = v.TransformedPos.z;
+				DaedalusVtx & d = dst[ i ];
+				memcpy(static_cast<void *>(&d.Texture), &v.Texture, 8);
+				d.Colour = c32( v.Pad );
+				memcpy(static_cast<void *>(&d.Position), &v.TransformedPos, 12);
 			}
 		}
 	}
@@ -1171,7 +1183,9 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 		_TnLVFPU_Plight( &mat_world, &mat_world_project, pVtxBase, &mVtxProjected[v0], n, &mTnL );
 	}
 #elif defined(DAEDALUS_CTR)
+#ifdef DAEDALUS_CTR_XRAY
 	const u64 vtx_t0 = svcGetSystemTick();
+#endif
 	mVtxPackedColourValid = true;
 
 	DAEDALUS_STATIC_ASSERT( sizeof(FiddledVtx) == 16 );
@@ -1186,24 +1200,26 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 	const FiddledVtx * __restrict src = pVtxBase;
 
 	// ARM11 VFPv2 LEN=4 hardware vector transform:
-	// Keeps each 4x4 matrix resident in VFP banks 2 & 3 (s16-s31) across the entire
-	// batch of n vertices (L1 D-cache resident), computing ProjectedPos and
-	// TransformedPos at 4 floats per VFPv2 vector instruction.
+	// Pass 1 converts s16 (x,y,z) -> f32 ONCE, stashes {s0-s2} in dst[k].TransformedPos,
+	// and computes ProjectedPos = v * mat_world_project.
+	// Pass 2 loads {s0-s2} directly via vldmia (avoiding 3 ldrsh + 3 ARM->VFP vmov stalls
+	// + 3 vcvt per vertex!) and overwrites TransformedPos = v * mat_world.
 	if (n > 0)
 	{
 		u32 old_fpscr, vec_fpscr, cnt, vx_i, vy_i, vz_i;
 		const FiddledVtx * p_src = src;
-		u8 * p_dst = reinterpret_cast<u8 *>(dst) + 16; // &dst[0].ProjectedPos
+		u8 * p_dst = reinterpret_cast<u8 *>(dst); // &dst[0].TransformedPos (+16 = ProjectedPos)
 		__asm__ volatile (
 			"fmrx   %[old_f], fpscr\n\t"
 			"bic    %[vec_f], %[old_f], #0x00370000\n\t"
 			"orr    %[vec_f], %[vec_f], #0x00030000\n\t"
 			"fmxr   fpscr, %[vec_f]\n\t"
 
-			// Pass 1: ProjectedPos = v * mat_world_project
+			// Pass 1: stash float (x,y,z) at [pd+0] and write ProjectedPos at [pd+16]
 			"vldmia %[mwp], {s16-s31}\n\t"
 			"mov    %[cnt], %[n_in]\n\t"
 			"1:\n\t"
+			"pld    [%[ps], #64]\n\t"
 			"ldrsh  %[vy], [%[ps], #0]\n\t"
 			"ldrsh  %[vx], [%[ps], #2]\n\t"
 			"ldrsh  %[vz], [%[ps], #6]\n\t"
@@ -1213,37 +1229,29 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 			"vcvt.f32.s32 s0, s0\n\t"
 			"vcvt.f32.s32 s1, s1\n\t"
 			"vcvt.f32.s32 s2, s2\n\t"
+			"vstmia %[pd], {s0-s2}\n\t"
 			"vmov.f32 s8, s28\n\t"
 			"vmla.f32 s8, s16, s0\n\t"
 			"vmla.f32 s8, s20, s1\n\t"
 			"vmla.f32 s8, s24, s2\n\t"
-			"vstmia %[pd], {s8-s11}\n\t"
+			"add    %[vx], %[pd], #16\n\t"
+			"vstmia %[vx], {s8-s11}\n\t"
 			"add    %[ps], %[ps], #16\n\t"
 			"add    %[pd], %[pd], #64\n\t"
 			"subs   %[cnt], %[cnt], #1\n\t"
 			"bne    1b\n\t"
 
-			// Pass 2: TransformedPos = v * mat_world
+			// Pass 2: reload float (x,y,z) from [pd] and compute TransformedPos = v * mat_world
 			"vldmia %[mw], {s16-s31}\n\t"
-			"mov    %[ps], %[src_base]\n\t"
 			"mov    %[pd], %[dst_base]\n\t"
 			"mov    %[cnt], %[n_in]\n\t"
 			"2:\n\t"
-			"ldrsh  %[vy], [%[ps], #0]\n\t"
-			"ldrsh  %[vx], [%[ps], #2]\n\t"
-			"ldrsh  %[vz], [%[ps], #6]\n\t"
-			"vmov   s0, %[vx]\n\t"
-			"vmov   s1, %[vy]\n\t"
-			"vmov   s2, %[vz]\n\t"
-			"vcvt.f32.s32 s0, s0\n\t"
-			"vcvt.f32.s32 s1, s1\n\t"
-			"vcvt.f32.s32 s2, s2\n\t"
+			"vldmia %[pd], {s0-s2}\n\t"
 			"vmov.f32 s8, s28\n\t"
 			"vmla.f32 s8, s16, s0\n\t"
 			"vmla.f32 s8, s20, s1\n\t"
 			"vmla.f32 s8, s24, s2\n\t"
 			"vstmia %[pd], {s8-s11}\n\t"
-			"add    %[ps], %[ps], #16\n\t"
 			"add    %[pd], %[pd], #64\n\t"
 			"subs   %[cnt], %[cnt], #1\n\t"
 			"bne    2b\n\t"
@@ -1253,7 +1261,7 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 			  [old_f] "=&r" (old_fpscr), [vec_f] "=&r" (vec_fpscr),
 			  [cnt] "=&r" (cnt), [vx] "=&r" (vx_i), [vy] "=&r" (vy_i), [vz] "=&r" (vz_i)
 			: [mwp] "r" (mat_world_project.mRaw), [mw] "r" (mat_world.mRaw),
-			  [src_base] "r" (src), [dst_base] "r" (dst), [n_in] "r" (n)
+			  [dst_base] "r" (dst), [n_in] "r" (n)
 			: "s0", "s1", "s2",
 			  "s8", "s9", "s10", "s11",
 			  "s16", "s17", "s18", "s19", "s20", "s21", "s22", "s23",
@@ -1273,8 +1281,10 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 			DaedalusVtx4 & out = dst[k];
 
 			out.ClipFlags = set_clip_flags(out.ProjectedPos);
-			// PrepareTrisUnclipped reads out.Pad directly on CTR; skip unused float Colour writes.
-			out.Pad = c32(vert.rgba_r, vert.rgba_g, vert.rgba_b, vert.rgba_a).GetColour();
+			// FiddledVtx offset 12 is [rgba_a, rgba_b, rgba_g, rgba_r] -> BSWAP32 gives c32 ABGR in 1 REV op.
+			u32 raw_rgba;
+			memcpy(&raw_rgba, &vert.rgba_a, sizeof(raw_rgba));
+			out.Pad = __builtin_bswap32(raw_rgba);
 			out.Texture.x = (f32)vert.tu * tex_scale_x;
 			out.Texture.y = (f32)vert.tv * tex_scale_y;
 		}
@@ -1398,7 +1408,9 @@ void BaseRenderer::SetNewVertexInfo(u32 address, u32 v0, u32 n)
 			}
 		}
 	}
+#ifdef DAEDALUS_CTR_XRAY
 	PerfCTR::AddVtx(svcGetSystemTick() - vtx_t0);
+#endif
 #else
 	// Transform and Project + Lighting or Transform and Project with Colour
 	//
@@ -1664,7 +1676,9 @@ void BaseRenderer::SetNewVertexInfoConker(u32 address, u32 v0, u32 n)
 void BaseRenderer::SetNewVertexInfoDKR(u32 address, u32 v0, u32 n, bool billboard)
 {
 #ifdef DAEDALUS_CTR
+#ifdef DAEDALUS_CTR_XRAY
 	const u64 vtx_t0 = svcGetSystemTick();
+#endif
 	mVtxPackedColourValid = true;
 #endif
 	u32 pVtxBase {u32(g_pu8RamBase + address)};
@@ -1713,7 +1727,9 @@ void BaseRenderer::SetNewVertexInfoDKR(u32 address, u32 v0, u32 n, bool billboar
 
 			pVtxBase += 10;
 		}
+#ifdef DAEDALUS_CTR_XRAY
 		PerfCTR::AddVtx(svcGetSystemTick() - vtx_t0);
+#endif
 #else
 		v4 & BaseVec( mVtxProjected[0].TransformedPos );
 
@@ -1831,7 +1847,9 @@ void BaseRenderer::SetNewVertexInfoDKR(u32 address, u32 v0, u32 n, bool billboar
 		{
 			dst[k].ClipFlags = set_clip_flags(dst[k].ProjectedPos);
 		}
+#ifdef DAEDALUS_CTR_XRAY
 		PerfCTR::AddVtx(svcGetSystemTick() - vtx_t0);
+#endif
 #else
 		for (u32 i = v0; i < v0 + n; i++)
 		{
@@ -2200,6 +2218,11 @@ void BaseRenderer::UpdateTileSnapshot( u32 index, u32 tile_idx )
 	DAEDALUS_ASSERT( tile_idx < 8, "Invalid tile index %d", tile_idx );
 	DAEDALUS_ASSERT( index < kNumBoundTextures, "Invalid texture index %d", index );
 #endif
+#ifdef DAEDALUS_CTR
+	const u32 rdp_gen = (gRDPStateManager.GetStateGen() << 2) | (gRDPOtherMode.text_tlut & 3u);
+	if (mBoundTexture[index] != nullptr && mActiveTile[index] == tile_idx && mBoundTileGen[index] == rdp_gen)
+		return;
+#endif
 	// This hapens a lot! Even for index 0 (i.e. the main texture!)
 	// It might just be code that lazily does a texrect with Primcolour (i.e. not using either T0 or T1)?
 	// DAEDALUS_ASSERT( gRDPStateManager.IsTileInitialised( tile_idx ), "Tile %d hasn't been set up (index %d)", tile_idx, index );
@@ -2211,7 +2234,7 @@ void BaseRenderer::UpdateTileSnapshot( u32 index, u32 tile_idx )
 	// Avoid texture update, if texture is the same as last time around.
 	if( mBoundTexture[ index ] == nullptr || mBoundTextureInfo[ index ] != ti )
 	{
-#ifdef DAEDALUS_CTR
+#ifdef DAEDALUS_CTR_XRAY
 		const u64 tex_t0 = svcGetSystemTick();
 #endif
 		// // Check for 0 width/height textures
@@ -2238,7 +2261,7 @@ void BaseRenderer::UpdateTileSnapshot( u32 index, u32 tile_idx )
 #endif
 			// }
 		}
-#ifdef DAEDALUS_CTR
+#ifdef DAEDALUS_CTR_XRAY
 		PerfCTR::AddTex(svcGetSystemTick() - tex_t0);
 #endif
 	}
@@ -2295,6 +2318,9 @@ void BaseRenderer::UpdateTileSnapshot( u32 index, u32 tile_idx )
 	mTileTopLeft[ index ].t = tile_size.top;
 
 	mActiveTile[ index ] = tile_idx;
+#ifdef DAEDALUS_CTR
+	mBoundTileGen[ index ] = rdp_gen;
+#endif
 
 #ifdef DAEDALUS_DEBUG_DISPLAYLIST
 	DL_PF( "    Use Tile[%d] as Texture[%d] [%dx%d] [%s/%dbpp] [%s u, %s v] -> Adr[0x%08x] PAL[0x%x] Hash[0x%08x] Pitch[%d] TopLeft[%0.3f|%0.3f]",

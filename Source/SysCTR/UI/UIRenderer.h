@@ -44,11 +44,28 @@ namespace Renderer
 	void QuadVGrad(float x, float y, float w, float h, uint32_t topCol, uint32_t botCol);
 	void QuadGrad(float x, float y, float w, float h,
 	              uint32_t cTL, uint32_t cTR, uint32_t cBL, uint32_t cBR);
+	void PolyTri(float x0, float y0, float x1, float y1, float x2, float y2,
+	             uint32_t c0, uint32_t c1, uint32_t c2);
+	void TexturedPolyTri(C3D_Tex * tex,
+	                     float x0, float y0, float x1, float y1, float x2, float y2,
+	                     float u0, float v0, float u1, float v1, float u2, float v2,
+	                     uint32_t c0, uint32_t c1, uint32_t c2);
+	void PolyQuad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+	              uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3);
+	void TexturedPolyQuad(C3D_Tex * tex,
+	                      float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+	                      float u0, float v0, float u1, float v1,
+	                      uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3);
 	void TexturedQuad(C3D_Tex * tex, float x, float y, float w, float h,
 	                  float u0, float v0, float u1, float v1, uint32_t col = 0xFFFFFFFFu);
 
+	// Authentic Nintendo 3DS HOME Menu 4-corner glowing cyan cursor
+	void Draw3DSCornerCursor(float x, float y, float w, float h, float radius,
+	                         uint32_t mainCol, uint32_t glowCol);
+
 	// Smooth SDF rounded primitives & circles (from UIAtlas, zero extra draw calls!)
 	void RoundedRect(float x, float y, float w, float h, float radius, uint32_t fillCol);
+	void RoundedRectVGrad(float x, float y, float w, float h, float radius, uint32_t cTop, uint32_t cBot);
 	void RoundedBorder2(float x, float y, float w, float h, float radius, uint32_t borderCol);
 	void RoundedBorder1(float x, float y, float w, float h, float radius, uint32_t borderCol);
 	void Circle(float cx, float cy, float radius, uint32_t col);
@@ -60,6 +77,7 @@ namespace Renderer
 	float LineHeight(EFontSize font, float scale = 1.0f);
 	void  Text(EFontSize font, float x, float y, const char * text, uint32_t col, float scale = 1.0f);
 	void  TextCentered(EFontSize font, float cx, float y, const char * text, uint32_t col, float scale = 1.0f);
+	void  TextCenteredEllipsis(EFontSize font, float cx, float y, float maxW, const char * text, uint32_t col, float scale = 1.0f);
 	void  TextRight(EFontSize font, float rightX, float y, const char * text, uint32_t col, float scale = 1.0f);
 	void  TextEllipsis(EFontSize font, float x, float y, float maxW, const char * text, uint32_t col, float scale = 1.0f);
 	void  TextWrapped(EFontSize font, float x, float y, float maxW, float lineH, const char * text, uint32_t col, float scale = 1.0f);

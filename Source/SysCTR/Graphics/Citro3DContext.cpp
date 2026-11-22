@@ -1,8 +1,10 @@
 #include "stdafx.h"
 #include "Citro3DContext.h"
+#include "Graphics/NativeTexture.h"
 #include "SysCTR/Utility/PerfProfilerCTR.h"
 
 #include <cstring>
+#include <vector>
 #include "daedalus_vshader_shbin.h"
 
 namespace
@@ -18,9 +20,48 @@ namespace
 		GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
 
 	bool               sInitialised    = false;
+	bool               sExiting        = false;
 	bool               sGameFrameOpen  = false;
 	bool               sUIFrameOpen    = false;
 	u32                sDrawsInFrame   = 0;
+	u32                sGameFrameCounter = 0;
+
+	constexpr u32      kMaxVramPromotesPerFrame = 8;
+	std::vector<CNativeTexture *> sVramPromoteQueue;
+	std::vector<void *>           sDeferredTexFrees;
+
+	void DrainDeferredTexFrees()
+	{
+		if (sDeferredTexFrees.empty())
+			return;
+		for (void * ptr : sDeferredTexFrees)
+		{
+			if (!ptr)
+				continue;
+			const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+			if (addr >= OS_VRAM_VADDR && addr < OS_VRAM_VADDR + OS_VRAM_SIZE)
+				vramFree(ptr);
+			else
+				linearFree(ptr);
+		}
+		sDeferredTexFrees.clear();
+	}
+
+	void ProcessVramPromotions()
+	{
+		if (sVramPromoteQueue.empty() || sExiting)
+			return;
+		u32 promoted = 0;
+		size_t idx = 0;
+		while (idx < sVramPromoteQueue.size() && promoted < kMaxVramPromotesPerFrame)
+		{
+			CNativeTexture * tex = sVramPromoteQueue[idx++];
+			if (tex && tex->TryPromoteToVram())
+				++promoted;
+		}
+		if (idx > 0)
+			sVramPromoteQueue.erase(sVramPromoteQueue.begin(), sVramPromoteQueue.begin() + static_cast<ptrdiff_t>(idx));
+	}
 
 	bool               sBatchActive    = false;
 	int                sBatchFirst     = 0;
@@ -200,7 +241,10 @@ bool Init()
 	}
 	C3D_RenderTargetSetOutput(sTopTarget, GFX_TOP, GFX_LEFT, kDisplayTransferFlags);
 
-	sBotTarget = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+	// Bottom screen renders only 2D touch HUD/menus with depth disabled; omitting the
+	// unused DEPTH24_STENCIL8 buffer frees 307 KiB of high-bandwidth on-chip VRAM for
+	// N64 textures and halves bottom-screen clear traffic.
+	sBotTarget = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, -1);
 	if (!sBotTarget)
 	{
 		C3D_RenderTargetDelete(sTopTarget);
@@ -235,6 +279,7 @@ bool Init()
 		C3D_TexEnvInit(C3D_GetTexEnv(i));
 
 	sActiveTarget = sTopTarget;
+	sExiting = false;
 	sGameFrameOpen = false;
 	sUIFrameOpen = false;
 	sDrawsInFrame = 0;
@@ -244,8 +289,78 @@ bool Init()
 	return true;
 }
 
+void NotifyExiting()
+{
+	// Once aptMainLoop() returns false, GSP has revoked GPU rights and handed
+	// control to the 3DS HOME Menu. Submitting GX commands (C3D_FrameEnd /
+	// C3D_FrameSplit / GX_MemoryFill) would deadlock GSP and freeze HOME Menu.
+	sExiting = true;
+	sBatchActive = false;
+	sBatchFirst  = 0;
+	sBatchCount  = 0;
+	sGameFrameOpen = false;
+	sUIFrameOpen = false;
+	sDrawsInFrame = 0;
+}
+
+bool IsExiting()
+{
+	return sExiting;
+}
+
+u32 GetFrameCounter()
+{
+	return sGameFrameCounter;
+}
+
+void QueueTextureVramPromotion(CNativeTexture * tex)
+{
+	if (!tex || sExiting)
+		return;
+	if (sVramPromoteQueue.size() < 256)
+		sVramPromoteQueue.push_back(tex);
+}
+
+void UnregisterTextureVramPromotion(CNativeTexture * tex)
+{
+	if (!tex || sVramPromoteQueue.empty())
+		return;
+	for (size_t i = 0; i < sVramPromoteQueue.size(); ++i)
+	{
+		if (sVramPromoteQueue[i] == tex)
+		{
+			sVramPromoteQueue[i] = sVramPromoteQueue.back();
+			sVramPromoteQueue.pop_back();
+			return;
+		}
+	}
+}
+
+void DeferTexDataFree(void * ptr)
+{
+	if (!ptr)
+		return;
+	if (!sInitialised || sExiting)
+	{
+		const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+		if (addr >= OS_VRAM_VADDR && addr < OS_VRAM_VADDR + OS_VRAM_SIZE)
+			vramFree(ptr);
+		else
+			linearFree(ptr);
+		return;
+	}
+	sDeferredTexFrees.push_back(ptr);
+}
+
 void FlushPendingBatch()
 {
+	if (sExiting)
+	{
+		sBatchActive = false;
+		sBatchFirst = 0;
+		sBatchCount = 0;
+		return;
+	}
 	CommitPendingBatch();
 }
 
@@ -254,10 +369,20 @@ void Shutdown()
 	if (!sInitialised)
 		return;
 
-	CommitPendingBatch();
-	if (sGameFrameOpen || sUIFrameOpen)
+	if (!sExiting)
 	{
-		C3D_FrameEnd(GX_CMDLIST_FLUSH);
+		CommitPendingBatch();
+		if (sGameFrameOpen || sUIFrameOpen)
+		{
+			C3D_FrameEnd(GX_CMDLIST_FLUSH);
+			sGameFrameOpen = false;
+			sUIFrameOpen = false;
+			sDrawsInFrame = 0;
+		}
+	}
+	else
+	{
+		sBatchActive = false;
 		sGameFrameOpen = false;
 		sUIFrameOpen = false;
 		sDrawsInFrame = 0;
@@ -285,6 +410,8 @@ void Shutdown()
 	}
 	sActiveTarget = nullptr;
 
+	sVramPromoteQueue.clear();
+	DrainDeferredTexFrees();
 	C3D_Fini();
 	sInitialised = false;
 }
@@ -296,7 +423,7 @@ bool IsInitialised()
 
 void EnsureGameFrameBegun()
 {
-	if (!sInitialised || sGameFrameOpen)
+	if (!sInitialised || sExiting || sGameFrameOpen)
 		return;
 
 	if (sUIFrameOpen)
@@ -313,6 +440,12 @@ void EnsureGameFrameBegun()
 	C3D_FrameBegin(0);
 	sGameFrameOpen = true;
 	sDrawsInFrame = 0;
+	++sGameFrameCounter;
+	// Previous frame's gxQueue has just finished (C3D_FrameBegin waited on it):
+	// safe to free retired texture buffers and submit budgeted async VRAM DMA copies
+	// BEFORE any draw commands are recorded (zero C3D_FrameSplit, <=8 gxQueue entries).
+	DrainDeferredTexFrees();
+	ProcessVramPromotions();
 	sActiveTarget = sTopTarget;
 	C3D_FrameDrawOn(sTopTarget);
 	C3D_BindProgram(&sProgram);
@@ -322,7 +455,7 @@ void EnsureGameFrameBegun()
 
 void EndGameFrame()
 {
-	if (!sInitialised || !sGameFrameOpen)
+	if (!sInitialised || sExiting || !sGameFrameOpen)
 		return;
 
 	CommitPendingBatch();
@@ -333,7 +466,7 @@ void EndGameFrame()
 
 void SplitGameFrame()
 {
-	if (!sInitialised || !sGameFrameOpen)
+	if (!sInitialised || sExiting || !sGameFrameOpen)
 		return;
 
 	CommitPendingBatch();
@@ -341,6 +474,7 @@ void SplitGameFrame()
 	// so vertex buffer wrap-around never overwrites in-flight vertices.
 	C3D_FrameEnd(GX_CMDLIST_FLUSH);
 	C3D_FrameBegin(0);
+	DrainDeferredTexFrees();
 	sDrawsInFrame = 0;
 	sActiveTarget = sTopTarget;
 	C3D_FrameDrawOn(sTopTarget);
@@ -351,12 +485,12 @@ void SplitGameFrame()
 
 bool IsGameFrameActive()
 {
-	return sGameFrameOpen;
+	return sGameFrameOpen && !sExiting;
 }
 
 bool BeginGameBottomPass()
 {
-	if (!sInitialised || !sBotTarget)
+	if (!sInitialised || sExiting || !sBotTarget)
 		return false;
 
 	if (!sGameFrameOpen)
@@ -397,7 +531,7 @@ void EndGameBottomPass()
 
 void BeginUIFrame()
 {
-	if (!sInitialised)
+	if (!sInitialised || sExiting)
 		return;
 
 	if (sGameFrameOpen)
@@ -410,6 +544,7 @@ void BeginUIFrame()
 	if (!sUIFrameOpen)
 	{
 		C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+		DrainDeferredTexFrees();
 		sUIFrameOpen = true;
 		sDrawsInFrame = 0;
 		C3D_BindProgram(&sProgram);
@@ -420,7 +555,7 @@ void BeginUIFrame()
 
 void BeginUIScreen(gfxScreen_t screen, int width, int height, u32 clearRGBA8)
 {
-	if (!sInitialised)
+	if (!sInitialised || sExiting)
 		return;
 	if (!sUIFrameOpen)
 		BeginUIFrame();
@@ -428,7 +563,7 @@ void BeginUIScreen(gfxScreen_t screen, int width, int height, u32 clearRGBA8)
 	CommitPendingBatch();
 	C3D_RenderTarget * target = (screen == GFX_BOTTOM) ? sBotTarget : sTopTarget;
 	sActiveTarget = target;
-	C3D_RenderTargetClear(target, C3D_CLEAR_ALL, clearRGBA8, 0);
+	C3D_RenderTargetClear(target, (screen == GFX_BOTTOM) ? C3D_CLEAR_COLOR : C3D_CLEAR_ALL, clearRGBA8, 0);
 	C3D_FrameDrawOn(target);
 
 	InvalidateStateCache();
@@ -452,7 +587,7 @@ void BeginUIScreen(gfxScreen_t screen, int width, int height, u32 clearRGBA8)
 
 void EndUIFrame()
 {
-	if (!sInitialised || !sUIFrameOpen)
+	if (!sInitialised || sExiting || !sUIFrameOpen)
 		return;
 
 	CommitPendingBatch();
@@ -463,12 +598,12 @@ void EndUIFrame()
 
 void Clear(bool clearColor, bool clearDepth, u32 clearRGBA8, u32 clearDepthVal)
 {
-	if (!sInitialised || !sActiveTarget)
+	if (!sInitialised || sExiting || !sActiveTarget)
 		return;
 
 	u32 bits = 0;
 	if (clearColor) bits |= C3D_CLEAR_COLOR;
-	if (clearDepth) bits |= C3D_CLEAR_DEPTH;
+	if (clearDepth && sActiveTarget != sBotTarget) bits |= C3D_CLEAR_DEPTH;
 	if (bits == 0)
 		return;
 
@@ -794,7 +929,7 @@ void SetVertexBuffer(const void * data, size_t stride)
 
 void DrawArrays(GPU_Primitive_t prim, int first, int count)
 {
-	if (count <= 0)
+	if (count <= 0 || sExiting)
 		return;
 	if (!sState.valid || sState.tevDirty)
 	{

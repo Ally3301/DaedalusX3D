@@ -278,7 +278,14 @@ public:
 #else
 	inline void			SetPrimitiveDepth( u32 z )				{ mPrimDepth = (f32)(z - 0x4000) / (f32)0x4000;}
 #endif
-	inline void			SetPrimitiveLODFraction( f32 f )		{ mPrimLODFraction = f; }
+	inline void			SetPrimitiveLODFraction( f32 f )
+	{
+		mPrimLODFraction = f;
+#ifdef DAEDALUS_CTR
+		const f32 c = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+		mPrimLODByte = static_cast<u8>(c * 255.0f + 0.5f);
+#endif
+	}
 	inline void			SetPrimitiveColour( c32 colour )		{ mPrimitiveColour = colour; }
 	inline void			SetEnvColour( c32 colour )				{ mEnvColour = colour; }
 	inline void			SetBlendColour( c32 colour )			{ mBlendColour = colour; }
@@ -336,7 +343,52 @@ public:
 	inline void			CopyVtx( u32 vert_src, u32 vert_dst ) { mVtxProjected[vert_dst] = mVtxProjected[vert_src]; }
 
 	// Returns true if triangle visible, false otherwise
+#ifdef DAEDALUS_CTR
+	inline bool			AddTri(u32 v0, u32 v1, u32 v2)
+	{
+		if (DAEDALUS_EXPECT_UNLIKELY(v0 >= kMaxN64Vertices || v1 >= kMaxN64Vertices || v2 >= kMaxN64Vertices))
+		{
+			return false;
+		}
+		const DaedalusVtx4 & vtx0 = mVtxProjected[v0];
+		const DaedalusVtx4 & vtx1 = mVtxProjected[v1];
+		const DaedalusVtx4 & vtx2 = mVtxProjected[v2];
+		if (vtx0.ClipFlags & vtx1.ClipFlags & vtx2.ClipFlags)
+		{
+			return false;
+		}
+		if (mTnL.Flags.TriCull)
+		{
+			const v4 & A = vtx0.ProjectedPos;
+			const v4 & B = vtx1.ProjectedPos;
+			const v4 & C = vtx2.ProjectedPos;
+			// Exact projective homogeneous backface test: original sign = det * (Aw*Bw*Cw)^2.
+			const f32 det = A.w * (B.x * C.y - C.x * B.y)
+			              + B.w * (C.x * A.y - A.x * C.y)
+			              + C.w * (A.x * B.y - B.x * A.y);
+			if (det <= 0.0f)
+			{
+				if (mTnL.Flags.CullBack)
+					return false;
+			}
+			else if (!mTnL.Flags.CullBack)
+			{
+				return false;
+			}
+		}
+		const u32 n = mNumIndices;
+		if (DAEDALUS_EXPECT_LIKELY(n + 3 <= kMaxIndices))
+		{
+			mIndexBuffer[n]     = static_cast<u16>(v0);
+			mIndexBuffer[n + 1] = static_cast<u16>(v1);
+			mIndexBuffer[n + 2] = static_cast<u16>(v2);
+			mNumIndices = n + 3;
+		}
+		return true;
+	}
+#else
 	bool				AddTri(u32 v0, u32 v1, u32 v2);
+#endif
 
 	// Render our current triangle list to screen
 	void				FlushTris();
@@ -450,6 +502,9 @@ protected:
 
 	f32					mPrimDepth;
 	f32					mPrimLODFraction;
+#ifdef DAEDALUS_CTR
+	u8					mPrimLODByte;
+#endif
 
 	c32					mFogColour;				// Blender
 	c32					mPrimitiveColour;		// Combiner
@@ -477,6 +532,9 @@ protected:
 
 	// Index of the corresponding tile state.
 	u8						mActiveTile[ kNumBoundTextures ];
+#ifdef DAEDALUS_CTR
+	u32						mBoundTileGen[ kNumBoundTextures ];
+#endif
 
 
 	//Max is 18 according to the manual //Corn

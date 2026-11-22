@@ -17,7 +17,7 @@ namespace Renderer
 namespace
 {
 
-constexpr uint32_t kHalfVerts     = 4096;
+constexpr uint32_t kHalfVerts     = 12288;
 constexpr uint32_t kMaxBatchVerts = kHalfVerts * 2;
 constexpr uint32_t kHudHalfVerts  = 2560;
 constexpr uint32_t kHudMaxVerts   = kHudHalfVerts * 2;
@@ -124,6 +124,47 @@ void DrawNineSlice(float x, float y, float w, float h, float radius, const UVRec
 			const float cw = xs[c + 1] - xs[c];
 			if (cw <= 0.01f) continue;
 			EmitUVQuad(xs[c], ys[row], cw, rh, us[c], vs[row], us[c + 1], vs[row + 1], col);
+		}
+	}
+}
+
+void DrawNineSliceVGrad(float x, float y, float w, float h, float radius, const UVRect & uv, uint32_t cTop, uint32_t cBot)
+{
+	C3D_Tex * atlasTex = GetAtlas().GetTexture();
+	if (!atlasTex || w <= 0.0f || h <= 0.0f) return;
+	SetBatchTexture(atlasTex);
+
+	float b = radius * (UIAtlas::kSliceBorder / 8.5f);
+	if (b > w * 0.5f) b = w * 0.5f;
+	if (b > h * 0.5f) b = h * 0.5f;
+
+	const float frac = UIAtlas::kSliceBorder / UIAtlas::kSliceSize;
+	const float du   = (uv.u1 - uv.u0) * frac;
+	const float dv   = (uv.v1 - uv.v0) * frac;
+
+	const float xs[4] = { x, x + b, x + w - b, x + w };
+	const float ys[4] = { y, y + b, y + h - b, y + h };
+	const float us[4] = { uv.u0, uv.u0 + du, uv.u1 - du, uv.u1 };
+	const float vs[4] = { uv.v0, uv.v0 + dv, uv.v1 - dv, uv.v1 };
+	const float invH  = 1.0f / h;
+
+	for (int row = 0; row < 3; ++row)
+	{
+		const float rh = ys[row + 1] - ys[row];
+		if (rh <= 0.01f) continue;
+		const uint32_t rTop = LerpColor(cTop, cBot, (ys[row] - y) * invH);
+		const uint32_t rBot = LerpColor(cTop, cBot, (ys[row + 1] - y) * invH);
+		for (int c = 0; c < 3; ++c)
+		{
+			const float cw = xs[c + 1] - xs[c];
+			if (cw <= 0.01f) continue;
+			if (!ReserveVerts(6)) return;
+			PushVert(xs[c],     ys[row],     us[c],     vs[row],     rTop);
+			PushVert(xs[c + 1], ys[row],     us[c + 1], vs[row],     rTop);
+			PushVert(xs[c + 1], ys[row + 1], us[c + 1], vs[row + 1], rBot);
+			PushVert(xs[c],     ys[row],     us[c],     vs[row],     rTop);
+			PushVert(xs[c + 1], ys[row + 1], us[c + 1], vs[row + 1], rBot);
+			PushVert(xs[c],     ys[row + 1], us[c],     vs[row + 1], rBot);
 		}
 	}
 }
@@ -335,6 +376,85 @@ void QuadVGrad(float x, float y, float w, float h, uint32_t topCol, uint32_t bot
 	QuadGrad(x, y, w, h, topCol, topCol, botCol, botCol);
 }
 
+void PolyTri(float x0, float y0, float x1, float y1, float x2, float y2,
+             uint32_t c0, uint32_t c1, uint32_t c2)
+{
+	SetBatchTexture(GetAtlas().GetTexture());
+	if (!ReserveVerts(3)) return;
+	const float wu = GetAtlas().WhiteU();
+	const float wv = GetAtlas().WhiteV();
+	PushVert(x0, y0, wu, wv, c0);
+	PushVert(x1, y1, wu, wv, c1);
+	PushVert(x2, y2, wu, wv, c2);
+}
+
+void TexturedPolyTri(C3D_Tex * tex,
+                     float x0, float y0, float x1, float y1, float x2, float y2,
+                     float u0, float v0, float u1, float v1, float u2, float v2,
+                     uint32_t c0, uint32_t c1, uint32_t c2)
+{
+	if (!tex) return;
+	SetBatchTexture(tex);
+	if (!ReserveVerts(3)) return;
+	PushVert(x0, y0, u0, v0, c0);
+	PushVert(x1, y1, u1, v1, c1);
+	PushVert(x2, y2, u2, v2, c2);
+}
+
+void PolyQuad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+              uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3)
+{
+	SetBatchTexture(GetAtlas().GetTexture());
+	if (!ReserveVerts(6)) return;
+	const float wu = GetAtlas().WhiteU();
+	const float wv = GetAtlas().WhiteV();
+	PushVert(x0, y0, wu, wv, c0);
+	PushVert(x1, y1, wu, wv, c1);
+	PushVert(x2, y2, wu, wv, c2);
+	PushVert(x0, y0, wu, wv, c0);
+	PushVert(x2, y2, wu, wv, c2);
+	PushVert(x3, y3, wu, wv, c3);
+}
+
+void TexturedPolyQuad(C3D_Tex * tex,
+                      float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3,
+                      float u0, float v0, float u1, float v1,
+                      uint32_t c0, uint32_t c1, uint32_t c2, uint32_t c3)
+{
+	if (!tex) return;
+	SetBatchTexture(tex);
+	if (!ReserveVerts(6)) return;
+	PushVert(x0, y0, u0, v0, c0);
+	PushVert(x1, y1, u1, v0, c1);
+	PushVert(x2, y2, u1, v1, c2);
+	PushVert(x0, y0, u0, v0, c0);
+	PushVert(x2, y2, u1, v1, c2);
+	PushVert(x3, y3, u0, v1, c3);
+}
+
+void Draw3DSCornerCursor(float x, float y, float w, float h, float radius,
+                         uint32_t mainCol, uint32_t glowCol)
+{
+	// Outer soft cyan glow ring + 2px border
+	RoundedRect(x - 2.0f, y - 2.0f, w + 4.0f, h + 4.0f, radius + 2.0f, glowCol);
+	RoundedBorder2(x - 1.0f, y - 1.0f, w + 2.0f, h + 2.0f, radius + 1.0f, mainCol);
+	// 4 sculpted corner L-brackets (signature Nintendo 3DS Home Menu selection cursor)
+	const float arm = 12.0f;
+	const float th  = 3.0f;
+	// Top-Left
+	RoundedRect(x - 2.5f, y - 2.5f, arm, th, 1.5f, mainCol);
+	RoundedRect(x - 2.5f, y - 2.5f, th, arm, 1.5f, mainCol);
+	// Top-Right
+	RoundedRect(x + w + 2.5f - arm, y - 2.5f, arm, th, 1.5f, mainCol);
+	RoundedRect(x + w + 2.5f - th,  y - 2.5f, th, arm, 1.5f, mainCol);
+	// Bottom-Left
+	RoundedRect(x - 2.5f, y + h + 2.5f - th,  arm, th, 1.5f, mainCol);
+	RoundedRect(x - 2.5f, y + h + 2.5f - arm, th, arm, 1.5f, mainCol);
+	// Bottom-Right
+	RoundedRect(x + w + 2.5f - arm, y + h + 2.5f - th,  arm, th, 1.5f, mainCol);
+	RoundedRect(x + w + 2.5f - th,  y + h + 2.5f - arm, th, arm, 1.5f, mainCol);
+}
+
 void TexturedQuad(C3D_Tex * tex, float x, float y, float w, float h,
                   float u0, float v0, float u1, float v1, uint32_t col)
 {
@@ -346,6 +466,11 @@ void TexturedQuad(C3D_Tex * tex, float x, float y, float w, float h,
 void RoundedRect(float x, float y, float w, float h, float radius, uint32_t fillCol)
 {
 	DrawNineSlice(x, y, w, h, radius, GetAtlas().RoundedFillUV(), fillCol);
+}
+
+void RoundedRectVGrad(float x, float y, float w, float h, float radius, uint32_t cTop, uint32_t cBot)
+{
+	DrawNineSliceVGrad(x, y, w, h, radius, GetAtlas().RoundedFillUV(), cTop, cBot);
 }
 
 void RoundedBorder2(float x, float y, float w, float h, float radius, uint32_t borderCol)
@@ -456,6 +581,32 @@ void TextEllipsis(EFontSize font, float x, float y, float maxW, const char * tex
 		}
 	}
 	Text(font, x, y, buf, col, scale);
+}
+
+void TextCenteredEllipsis(EFontSize font, float cx, float y, float maxW, const char * text, uint32_t col, float scale)
+{
+	if (!text || !text[0]) return;
+	const float fullW = MeasureText(font, text, scale);
+	if (fullW <= maxW)
+	{
+		Text(font, cx - fullW * 0.5f, y, text, col, scale);
+		return;
+	}
+	char buf[128];
+	snprintf(buf, sizeof(buf), "%s", text);
+	size_t n = strlen(buf);
+	while (n > 1 && MeasureText(font, buf, scale) > maxW)
+	{
+		buf[--n] = '\0';
+		if (n >= 3)
+		{
+			buf[n - 3] = '.';
+			buf[n - 2] = '.';
+			buf[n - 1] = '.';
+		}
+	}
+	const float tw = MeasureText(font, buf, scale);
+	Text(font, cx - tw * 0.5f, y, buf, col, scale);
 }
 
 void TextWrapped(EFontSize font, float x, float y, float maxW, float lineH,

@@ -442,7 +442,11 @@ void SGlobalPreferences::Apply() const
 SRomPreferences::SRomPreferences()
 	:	PatchesEnabled( true )
 	,	DynarecEnabled( true )
+#if defined(DAEDALUS_CTR)
+	,	DynarecLoopOptimisation( true )
+#else
 	,	DynarecLoopOptimisation( false )
+#endif
 	,	DynarecDoublesOptimisation( true )
 	,	DoubleDisplayEnabled( true )
 	,	CleanSceneEnabled( false )
@@ -472,7 +476,11 @@ void SRomPreferences::Reset()
 	PatchesEnabled             = true;
 	SpeedSyncEnabled           = 1;
 	DynarecEnabled             = true;
+#if defined(DAEDALUS_CTR)
+	DynarecLoopOptimisation    = true;
+#else
 	DynarecLoopOptimisation    = false;
+#endif
 	DynarecDoublesOptimisation = true;
 	DoubleDisplayEnabled       = true;
 	CleanSceneEnabled          = false;

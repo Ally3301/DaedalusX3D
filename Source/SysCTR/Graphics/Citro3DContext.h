@@ -15,11 +15,24 @@ enum ECtrTexEnvMode : u32
 	CTR_TEXENV_DECAL    = 5,
 };
 
+class CNativeTexture;
+
 namespace Citro3D
 {
 	bool Init();
 	void Shutdown();
 	bool IsInitialised();
+
+	// Call immediately when aptMainLoop() returns false so no further GX/GSP
+	// submissions (C3D_FrameEnd/Begin/Clear) deadlock against a suspended GSP.
+	void NotifyExiting();
+	bool IsExiting();
+
+	// Monotonic gameplay frame counter + async VRAM texture promotion & deferred frees.
+	u32  GetFrameCounter();
+	void QueueTextureVramPromotion(CNativeTexture * tex);
+	void UnregisterTextureVramPromotion(CNativeTexture * tex);
+	void DeferTexDataFree(void * ptr);
 
 	// Game frame lifecycle (single top-screen target during gameplay).
 	void EnsureGameFrameBegun();

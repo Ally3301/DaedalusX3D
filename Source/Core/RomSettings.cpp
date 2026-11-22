@@ -123,6 +123,7 @@ class IRomSettingsDB : public CRomSettingsDB
 		// CRomSettingsDB implementation
 		//
 		bool			OpenSettingsFile( const char * filename );
+		void			SetSaveFilename( const char * filename ) { strcpy(mFilename, filename); }
 		void			Commit();												// (STRMNNRMN - Write ini back out to disk?)
 
 		bool			GetSettings( const RomID & id, RomSettings * p_settings ) const;
@@ -155,7 +156,17 @@ template<> bool	CSingleton< CRomSettingsDB >::Create()
 
 	IO::Filename	ini_filename;
 	IO::Path::Combine( ini_filename, gDaedalusExePath, "roms.ini" );
-	mpInstance->OpenSettingsFile( ini_filename );
+	if ( !mpInstance->OpenSettingsFile( ini_filename ) )
+	{
+#ifdef DAEDALUS_CTR
+		// Fall back to the bundled romfs:/roms.ini so .cia and .3dsx installs
+		// always have the full N64 SaveType (EEPROM/SRAM/FlashRAM) database
+		// even when the user hasn't manually copied roms.ini to the SD card.
+		mpInstance->OpenSettingsFile( "romfs:/roms.ini" );
+		// Keep future Commit() writes targeted at SD card, never read-only romfs:/.
+		static_cast<IRomSettingsDB*>(mpInstance)->SetSaveFilename( ini_filename );
+#endif
+	}
 
 	return true;
 }

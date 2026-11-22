@@ -445,8 +445,8 @@ if (CTR_RELEASE)
 				-rsf ${APP_RSF}
 				-banner ${APP_BANNER}
 				-icon ${APP_SMDH}
-				-romfs ${APP_ROMFS_BIN}
-		DEPENDS ${PROJECT_NAME}.elf ${APP_RSF} ${APP_BANNER} ${APP_SMDH} ${APP_ROMFS_BIN}
+				-DAPP_ROMFS=${APP_ROMFS_DIR}
+		DEPENDS ${PROJECT_NAME}.elf ${APP_RSF} ${APP_BANNER} ${APP_SMDH}
     )
 
 	add_custom_target( N3DS ALL

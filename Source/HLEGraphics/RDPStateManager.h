@@ -58,11 +58,12 @@ public:
 
 	// Retrive tile addr loading. used by Yoshi_MemRect
 	inline u32						GetTileAddress( u32 tmem ) const { return mTmemLoadInfo[ tmem >> 4 ].Address; }
+	inline u32						GetStateGen() const				{ return mStateGen; }
 
 	const TextureInfo &				GetUpdatedTextureDescriptor( u32 idx );
 
 private:
-	inline void				InvalidateAllTileTextureInfo()		{ memset( mTileTextureInfoValid, 0, sizeof(mTileTextureInfoValid) ); }
+	inline void				InvalidateAllTileTextureInfo()		{ memset( mTileTextureInfoValid, 0, sizeof(mTileTextureInfoValid) ); ++mStateGen; }
 	inline u32				EntryIsValid( const u32 tmem )const	{ return (mValidEntryBits >> tmem) & 1; }	//Return 1 if entry is valid else 0
 	inline void				SetValidEntry( const u32 tmem )		{ mValidEntryBits |= (1 << tmem); }	//Set TMEM address entry as valid
 	inline void				ClearEntries( const u32 tmem )		{ mValidEntryBits &= ((u32)~0 >> (31-tmem)); }	//Clear all entries after the specified TMEM address
@@ -83,6 +84,7 @@ private:
 
 	TextureInfo				mTileTextureInfo[ 8 ];
 	bool					mTileTextureInfoValid[ 8 ];		// Set to false if this needs rebuilding
+	u32						mStateGen;
 
 	bool					EmulateMirror;
 };

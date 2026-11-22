@@ -70,7 +70,10 @@ class CNativeTexture : public CRefCounted
 
 #if defined(DAEDALUS_CTR)
 		inline C3D_Tex *				GetC3DTexture() const				{ return mHasTex ? &mTex : nullptr; }
+		inline bool						IsOnVram() const					{ return mOnVram; }
 		void							ApplyParams( GPU_TEXTURE_FILTER_PARAM filter, GPU_TEXTURE_WRAP_PARAM wrap_s, GPU_TEXTURE_WRAP_PARAM wrap_t ) const;
+		void							NoteBoundForVram() const;
+		bool							TryPromoteToVram();
 		void							SetDataRaw5551( const u16 * pixels, u32 src_w, u32 src_h );
 		bool							UploadDirectN64RGBA16( const u8 * rdram, u32 load_addr, u32 pitch, bool swapped );
 		bool							UploadDirectN64CI( const u8 * rdram, u32 load_addr, u32 pitch, u32 tlut_addr, bool is_ci8, bool swapped );
@@ -99,9 +102,14 @@ class CNativeTexture : public CRefCounted
 		GLuint				mTextureId;
 #endif
 #if defined(DAEDALUS_CTR)
+		bool				EnsureLinearForCpuWrite();
 		mutable C3D_Tex		mTex;
 		bool				mHasTex;
 		bool				mOnVram;
+		bool				mDynamic;
+		mutable bool		mQueuedForVram;
+		mutable u8			mBindFrames;
+		mutable u32			mLastBindFrame;
 		mutable int			mCachedFilter;
 		mutable int			mCachedWrapS;
 		mutable int			mCachedWrapT;

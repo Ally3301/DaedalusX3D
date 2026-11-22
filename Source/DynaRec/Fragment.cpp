@@ -33,6 +33,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #include "Core/Registers.h"
 #include "Core/CPU.h"			// Try to remove this cyclic dependency
 #include "Core/Memory.h"
+#include "Core/ROM.h"
 #include "Core/R4300.h"
 #include "Core/Interrupt.h"
 
@@ -170,6 +171,11 @@ void CFragment::AddCoveredRange( u32 address, u32 length )
 		const u32 segment = address & 0xE0000000u;
 		if (segment != 0x80000000u && segment != 0xA0000000u)
 		{
+			// GoldenEye 007 maps read-only Cart ROM code at 0x7F000000..0x7FFFFFFF via
+			// Memory_Tlb_Hack(): RDRAM writes/PI DMA never modify it, so do not mark
+			// those fragments as overlapping every RDRAM invalidation.
+			if (g_ROM.GameHacks == GOLDEN_EYE && (address & 0xFF000000u) == 0x7F000000u)
+				return;
 			mHasUncoveredAddr = true;
 			return;
 		}
@@ -906,10 +912,10 @@ void CFragment::Assemble( CCodeBufferManager * p_manager,
 			{
 				bool inlined_delay = false;
 				const u32 delay_addr = branch_instruction_address + 4;
-				const u32 delay_phys = delay_addr & 0x1FFFFFFFu;
-				if ( ((delay_addr - 0x80000000u) < 0x40000000u) && (delay_phys + sizeof(OpCode) <= gRamSize) && g_pu8RamBase != nullptr )
+				const MemFuncRead & delay_mem = g_MemoryLookupTableRead[delay_addr >> 18];
+				if ( delay_mem.pRead != nullptr )
 				{
-					OpCode delay_op = *reinterpret_cast<const OpCode *>(g_pu8RamBase + delay_phys);
+					OpCode delay_op = *reinterpret_cast<const OpCode *>(delay_mem.pRead + delay_addr);
 					const u32 op = delay_op.op;
 					const bool is_safe_delay =
 						op != OP_REGIMM && op != OP_J && op != OP_JAL &&

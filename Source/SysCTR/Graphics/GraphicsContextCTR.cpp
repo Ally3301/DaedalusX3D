@@ -23,6 +23,7 @@
 #include "SysCTR/UI/UserInterface.h"
 
 extern void HandleEndOfFrame();
+extern bool shouldQuit;
 
 #define SCR_WIDTH 400
 #define SCR_HEIGHT 240
@@ -213,6 +214,9 @@ void IGraphicsContext::ResetVertexBuffer()
 
 void IGraphicsContext::BeginFrame()
 {
+	if (shouldQuit || Citro3D::IsExiting())
+		return;
+
 	if (newFrame)
 	{
 		Citro3D::EnsureGameFrameBegun();
@@ -230,12 +234,20 @@ void IGraphicsContext::BeginFrame()
 
 void IGraphicsContext::EndFrame()
 {
-	HandleEndOfFrame();
+	// Do NOT call HandleEndOfFrame() (aptMainLoop) here: DLParser invokes
+	// EndScene()/EndFrame() while the citro3d gameplay frame is still open
+	// (C3D_FrameBegin without C3D_FrameEnd). Calling aptMainLoop() mid-frame
+	// causes HOME -> Close (.cia) to deadlock GSP on real 3DS hardware.
+	// HandleEndOfFrame() runs right after Citro3D::EndGameFrame() in UpdateFrame()
+	// and via the VBL watchdog if a game stops presenting frames.
 }
 
 void IGraphicsContext::UpdateFrame(bool wait_for_vbl)
 {
 	(void)wait_for_vbl;
+
+	if (shouldQuit || Citro3D::IsExiting())
+		return;
 
 	const u64 pres_t0 = svcGetSystemTick();
 
@@ -257,6 +269,8 @@ void IGraphicsContext::UpdateFrame(bool wait_for_vbl)
 		UI::TouchController::MarkDirty();
 		newFrame = true;
 		PerfCTR::Reset();
+		if (!shouldQuit && !Citro3D::IsExiting())
+			HandleEndOfFrame();
 		return;
 	}
 
@@ -274,6 +288,10 @@ void IGraphicsContext::UpdateFrame(bool wait_for_vbl)
 
 	PerfCTR::AddPresent(svcGetSystemTick() - pres_t0);
 	newFrame = true;
+
+	// Safe point: citro3d frame is now closed (inFrame == false), so aptMainLoop()
+	// can suspend to the 3DS HOME Menu or exit cleanly without deadlocking GSP.
+	HandleEndOfFrame();
 }
 
 void IGraphicsContext::ViewportType(u32 *d_width, u32 *d_height) const
