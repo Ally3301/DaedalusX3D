@@ -1,3 +1,7 @@
+// UITheme: Color palettes for FrontendCTR (GPL-2.0-or-later).
+// Current palette & styling derived from ctr64 by gl91306
+// (https://github.com/gl91306/ctr64, GPL-2.0-or-later); scheduled for
+// replacement with an original UI design — see CREDITS.md.
 #include "UITheme.h"
 
 namespace UI

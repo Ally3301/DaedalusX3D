@@ -31,6 +31,7 @@ Fork do **DaedalusX64** focado e otimizado especificamente para **Nintendo 3DS O
 ### Roadmap
 - [x] **Migração de backend gráfico (`picaGL` → `citro3d` / PICA200 nativo)** — entregue na `v0.1.0-Stable`.
 - [x] **Offload de áudio HLE no Core 1/2 e invalidação seletiva no DynaRec** — entregue na `v0.1.0-Stable`.
+- [ ] **Redesign original da UI e assets visuais** — substituir o layout e os assets visuais derivados do `ctr64` por uma interface e identidade visual 100% próprias (conforme solicitado pelo criador do `ctr64`, `gl91306`).
 - [ ] Mais otimizações de banda no Old 3DS e melhorias de compatibilidade por jogo.
 
 ---
@@ -123,5 +124,14 @@ sh tests/ctr_host/run.sh
 - [`tests/`](tests/) — Suíte de testes unitários de host (`ctr_host`).
 - [`releases/`](releases/) — Pasta preparada para empacotamento de releases (`.3dsx` / `.cia`).
 
+## Créditos & Agradecimentos
+
+Os créditos completos e as licenças de terceiros estão detalhados em [`CREDITS.md`](CREDITS.md).
+
+- **[DaedalusX64](https://github.com/DaedalusX64/daedalus) & [DaedalusX64-3DS](https://github.com/masterfeizz/DaedalusX64-3DS)** (*StrmnNrmn*, *MasterFeizz* e colaboradores) — base original do emulador de Nintendo 64 e port inicial para Nintendo 3DS (`GPL-2.0-or-later`).
+- **[ctr64](https://github.com/gl91306/ctr64)** por **gl91306** (`GPL-2.0-or-later`) — créditos pelo design atual da interface dual-screen, estilo visual, grid 3×3 do menu de pausa e assets de UI utilizados, além de referências de otimizações no DynaRec ARM para 3DS. *(A pedido do criador `gl91306`, a UI e os assets derivados do ctr64 serão substituídos por um design próprio em uma atualização futura.)*
+- **[Mupen64Plus](https://github.com/mupen64plus/mupen64plus-core) & [Mupen64Plus-Next](https://github.com/libretro/mupen64plus-libretro-nx)** (*Richard Goedeken / Richard42*, *Sven Eckelmann*, *Hacktarux*, **Ari64** e colaboradores; `GPL-2.0-or-later`) — referência e implementações de técnicas do recompilador dinâmico ARM (`new_dynarec` de Ari64) e comportamento do core de emulação R4300i/RSP do N64.
+- **[devkitPro](https://devkitpro.org/) / devkitARM / libctru / citro3d** (`zlib`), **libpng / zlib**, **stb_truetype.h** (`MIT / Domínio Público`), **Roboto-Medium.ttf** (`Apache-2.0`) e **[libretro-thumbnails](https://github.com/libretro-thumbnails/libretro-thumbnails)**.
+
 ## Licença
-Baseado no **DaedalusX64** sob licença GNU GPL v2 ([`copying.txt`](copying.txt)).
+Distribuído sob a **GNU General Public License v2.0 ou posterior (`GPL-2.0-or-later`)** — consulte [`copying.txt`](copying.txt) e [`CREDITS.md`](CREDITS.md). Os projetos base e referenciados (**DaedalusX64**, **ctr64** e **Mupen64Plus / Mupen64Plus-Next**) são licenciados sob `GPL-2.0-or-later`, e o código-fonte completo correspondente acompanha todos os binários distribuídos. Este repositório não hospeda ROMs nem conteúdo protegido por direitos autorais.

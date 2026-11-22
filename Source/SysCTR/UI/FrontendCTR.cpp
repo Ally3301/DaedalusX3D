@@ -1,10 +1,18 @@
-// FrontendCTR: Modern 3DS-native dual-screen frontend built on Citro3D.
+// FrontendCTR: Dual-screen Nintendo 3DS frontend built on Citro3D.
+// License: GNU GPL v2.0 or later (GPL-2.0-or-later) — see copying.txt & CREDITS.md.
+//
+// Attribution: The current UI design, layout (including the 3x3 pause grid), and
+// visual styling are derived from ctr64 by gl91306 (https://github.com/gl91306/ctr64,
+// GPL-2.0-or-later). Per gl91306's request, the ctr64-derived UI design and assets
+// are scheduled to be replaced with an original UI design in a future update.
+//
 // Powered by modular UITheme, UIAtlas (Roboto-Medium + SDF shapes/icons),
-// UIRenderer (single-batch 9-slice & typography), UITouchInput, and
-// TouchControllerCTR (Phase 2 physical-extension bottom-screen controls).
+// UIRenderer (single-batch 9-slice & typography), UITouchInput, FrontendAudio,
+// and TouchControllerCTR (physical-extension bottom-screen controls).
 
 #include "stdafx.h"
 #include "FrontendCTR.h"
+#include "FrontendAudio.h"
 #include "UITheme.h"
 #include "UIAtlas.h"
 #include "UIRenderer.h"
@@ -675,21 +683,30 @@ void RunControlsPage(const char * gameName, const CRefPtr<CNativeTexture> & free
 			}
 		}
 
-		if (down & KEY_B) break;
+		if (down & KEY_B)
+		{
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_BACK);
+			break;
+		}
 		if (down & KEY_Y)
 		{
 			ToggleLightDark();
 			SaveFrontendConfig();
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 		}
+		const int prevSel = sel;
 		if (rep.Poll(down, held, KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN, 0))
 			sel = (sel + 1) % kCount;
 		if (rep.Poll(down, held, KEY_UP | KEY_DUP | KEY_CPAD_UP, 1))
 			sel = (sel + kCount - 1) % kCount;
+		if (sel != prevSel)
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_MOVE);
 
 		const int dir = (down & (KEY_A | KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT | KEY_R)) ? 1 :
 		                (down & (KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT | KEY_L)) ? -1 : 0;
 		if (dir != 0)
 		{
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 			switch (sel)
 			{
 			case 0:
@@ -851,6 +868,7 @@ bool Initialise()
 
 void Shutdown()
 {
+	FrontendAudio::End();
 	CoverScraper::Stop();
 	ReleasePreview();
 	UI::Renderer::Shutdown();
@@ -862,8 +880,9 @@ void Shutdown()
 
 void ReleaseAssets()
 {
-	// Release preview texture and menu vertex pool before emulation so Old 3DS
-	// retains maximum Linear RAM for N64 textures (UIAtlas + 24 KiB HUD pool stay ready).
+	// Release preview texture, frontend DSP audio, and menu vertex pool before emulation so
+	// Old 3DS retains maximum Linear RAM and 0 DSP/CPU overhead for N64 gameplay.
+	FrontendAudio::End();
 	ReleasePreview();
 	ReleaseMenuPool();
 }
@@ -987,6 +1006,8 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 					{
 						if (touch.releaseX >= 205 || idx == selection)
 							down |= KEY_A;
+						else
+							FrontendAudio::PlaySfx(FrontendAudio::SFX_MOVE);
 						selection = idx;
 						manualScroll = false;
 					}
@@ -998,10 +1019,16 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 		{
 			ToggleLightDark();
 			SaveFrontendConfig();
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 		}
-		if (down & KEY_B) break;
+		if (down & KEY_B)
+		{
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_BACK);
+			break;
+		}
 		if (down & KEY_START)
 		{
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_SELECT);
 			if (CPreferences::Get())
 			{
 				CPreferences::Get()->SetRomPreferences(romId, prefs);
@@ -1025,6 +1052,7 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 			break;
 		}
 
+		const int prevSelection = selection;
 		if (rep.Poll(down, held, KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN, 0))
 		{
 			selection = (selection + 1) % kNumOptions;
@@ -1035,6 +1063,8 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 			selection = (selection + kNumOptions - 1) % kNumOptions;
 			manualScroll = false;
 		}
+		if (selection != prevSelection)
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_MOVE);
 
 		if (manualScroll)
 		{
@@ -1063,6 +1093,7 @@ void RunOptionsPage(const RomID & romId, bool applyRuntime)
 		                (down & (KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT | KEY_L)) ? -1 : 0;
 		if (dir != 0)
 		{
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 			switch (selection)
 			{
 			case 0:  prefs.DynarecEnabled = !prefs.DynarecEnabled; break;
@@ -1222,6 +1253,8 @@ std::string RunRomSelector()
 	if (!EnsureMenuPool())
 		return std::string();
 
+	FrontendAudio::Begin(true, 0.18f);
+
 	ScanRoms(false);
 	RefreshMemorySummary();
 	TickSystemStatus(true);
@@ -1345,11 +1378,11 @@ std::string RunRomSelector()
 			}
 			else if (!touch.dragged && !touch.scrollbarDrag)
 			{
-				if (touch.releaseY >= 218)
+				if (touch.releaseY >= 214)
 				{
-					if (touch.releaseX < 78) down |= KEY_A;
-					else if (touch.releaseX < 156) down |= KEY_Y;
-					else if (touch.releaseX < 238) down |= KEY_X;
+					if (touch.releaseX < 64) down |= KEY_A;
+					else if (touch.releaseX < 122) down |= KEY_Y;
+					else if (touch.releaseX < 230) down |= KEY_X;
 					else down |= KEY_START;
 				}
 				else if (s_viewCount > 0 && touch.releaseY >= (int)kListY &&
@@ -1368,6 +1401,7 @@ std::string RunRomSelector()
 
 		if (down & KEY_START)
 		{
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_BACK);
 			shouldQuit = true;
 			break;
 		}
@@ -1376,6 +1410,7 @@ std::string RunRomSelector()
 		{
 			ToggleLightDark();
 			SaveFrontendConfig();
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 			snprintf(toast, sizeof(toast), "Theme: %s", ActiveTheme().name);
 			toastFrames = 70;
 		}
@@ -1385,9 +1420,21 @@ std::string RunRomSelector()
 			s_sortMode = (s_sortMode + ((down & KEY_R) ? 1 : (SORT_COUNT - 1))) % SORT_COUNT;
 			RebuildView();
 			SaveFrontendConfig();
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 			manualScroll = false;
 			snprintf(toast, sizeof(toast), "Sort: %s", kSortNames[s_sortMode]);
 			toastFrames = 70;
+		}
+
+		if (down & KEY_X)
+		{
+			RomID optRomId;
+			if (s_viewCount > 0 && s_roms[s_viewOrder[s_selected]].hasDetails)
+				optRomId = s_roms[s_viewOrder[s_selected]].romId;
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_SELECT);
+			RunOptionsPage(optRomId, false);
+			RefreshMemorySummary();
+			touch.Reset();
 		}
 
 		if (s_viewCount > 0)
@@ -1420,27 +1467,18 @@ std::string RunRomSelector()
 				FrontendRomInfo & cur = s_roms[s_viewOrder[s_selected]];
 				cur.favorite = !cur.favorite;
 				SaveFrontendConfig();
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 				snprintf(toast, sizeof(toast), cur.favorite ? "Added to favorites" : "Removed from favorites");
 				toastFrames = 70;
 				if (s_sortMode == SORT_FAV)
 					RebuildView();
 			}
 
-			if (down & KEY_X)
-			{
-				const FrontendRomInfo & cur = s_roms[s_viewOrder[s_selected]];
-				if (cur.hasDetails)
-				{
-					RunOptionsPage(cur.romId, false);
-					RefreshMemorySummary();
-					touch.Reset();
-				}
-			}
-
 			if (s_selected != prevSelected)
 			{
 				prevSelected = s_selected;
 				infoAnim = 0.0f;
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_MOVE);
 				IO::Filename selPath;
 				BuildPreviewPathForRom(s_roms[s_viewOrder[s_selected]], selPath);
 				CoverScraper::Prioritize(selPath);
@@ -1667,10 +1705,15 @@ std::string RunRomSelector()
 
 		if (launch)
 		{
+			FrontendAudio::SetAmbientGain(0.0f);
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_LAUNCH);
 			CoverScraper::Stop();
 			const FrontendRomInfo & chosen = s_roms[s_viewOrder[s_selected]];
 			CopyStr(s_lastSelectedFile, sizeof(s_lastSelectedFile), chosen.filename);
 			SaveFrontendConfig();
+			// Let the hardware DSP finish the short launch chime before ReleaseAssets()
+			for (int f = 0; f < 14 && aptMainLoop(); ++f)
+				gspWaitForVBlank();
 			return std::string(chosen.path);
 		}
 	}
@@ -1690,6 +1733,9 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 		UI::RestoreRenderState();
 		return;
 	}
+
+	FrontendAudio::Begin(true, 0.11f);
+	FrontendAudio::PlaySfx(FrontendAudio::SFX_SELECT);
 
 	constexpr int kNumCells = 10;
 	static const Rect kCells[kNumCells] = {
@@ -1799,6 +1845,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 							const float mid = kCells[3].x + kCells[3].w * 0.5f;
 							slot = (touch.releaseX < (int)mid) ? ((slot + 4) % 5) : ((slot + 1) % 5);
 							TouchController::SetActiveSlot(slot);
+							FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 						}
 						else
 						{
@@ -1812,6 +1859,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 
 		if (down & (KEY_B | KEY_SELECT))
 		{
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_BACK);
 			exitMenu = true;
 			break;
 		}
@@ -1819,10 +1867,12 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 		{
 			ToggleLightDark();
 			SaveFrontendConfig();
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 		}
-		if (down & KEY_L) { slot = (slot + 4) % 5; TouchController::SetActiveSlot(slot); }
-		if (down & KEY_R) { slot = (slot + 1) % 5; TouchController::SetActiveSlot(slot); }
+		if (down & KEY_L) { slot = (slot + 4) % 5; TouchController::SetActiveSlot(slot); FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE); }
+		if (down & KEY_R) { slot = (slot + 1) % 5; TouchController::SetActiveSlot(slot); FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE); }
 
+		const int prevPauseSel = selection;
 		if (rep.Poll(down, held, KEY_DOWN | KEY_DDOWN | KEY_CPAD_DOWN, 0))
 		{
 			if (selection == 0) selection = 1;
@@ -1837,7 +1887,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 		}
 		if (rep.Poll(down, held, KEY_RIGHT | KEY_DRIGHT | KEY_CPAD_RIGHT, 2))
 		{
-			if (selection == 3) { slot = (slot + 1) % 5; TouchController::SetActiveSlot(slot); }
+			if (selection == 3) { slot = (slot + 1) % 5; TouchController::SetActiveSlot(slot); FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE); }
 			else if (selection > 0)
 			{
 				const int rowBase = 1 + ((selection - 1) / 3) * 3;
@@ -1847,7 +1897,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 		}
 		if (rep.Poll(down, held, KEY_LEFT | KEY_DLEFT | KEY_CPAD_LEFT, 3))
 		{
-			if (selection == 3) { slot = (slot + 4) % 5; TouchController::SetActiveSlot(slot); }
+			if (selection == 3) { slot = (slot + 4) % 5; TouchController::SetActiveSlot(slot); FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE); }
 			else if (selection > 0)
 			{
 				const int rowBase = 1 + ((selection - 1) / 3) * 3;
@@ -1855,6 +1905,8 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 				selection = rowBase + ((col + 2) % 3);
 			}
 		}
+		if (selection != prevPauseSel)
+			FrontendAudio::PlaySfx(FrontendAudio::SFX_MOVE);
 
 		if (down & KEY_A)
 		{
@@ -1863,19 +1915,25 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 			         DAEDALUS_CTR_PATH("SaveStates/"), gameName ? gameName : "rom", slot);
 			switch (selection)
 			{
-			case 0: exitMenu = true; break;
+			case 0:
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_BACK);
+				exitMenu = true;
+				break;
 			case 1:
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_SELECT);
 				CPU_RequestSaveState(path);
 				exitMenu = true;
 				break;
 			case 2:
 				if (slotExists[slot])
 				{
+					FrontendAudio::PlaySfx(FrontendAudio::SFX_SELECT);
 					CPU_RequestLoadState(path);
 					exitMenu = true;
 				}
 				else
 				{
+					FrontendAudio::PlaySfx(FrontendAudio::SFX_ERROR);
 					snprintf(toast, sizeof(toast), "Slot %d is empty", slot);
 					toastFrames = 75;
 				}
@@ -1883,6 +1941,7 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 			case 3:
 				slot = (slot + 1) % 5;
 				TouchController::SetActiveSlot(slot);
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 				break;
 			case 4:
 			{
@@ -1896,31 +1955,37 @@ void RunPauseMenu(const char * gameName, const RomID & romId)
 					CPreferences::Get()->SetRomPreferences(romId, p);
 					CPreferences::Get()->Commit();
 				}
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_TOGGLE);
 				snprintf(toast, sizeof(toast), "Audio: %s", AudioName(nextAud));
 				toastFrames = 75;
 				break;
 			}
 			case 5:
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_SELECT);
 				RunOptionsPage(romId, true);
 				RefreshSlots();
 				RefreshMemorySummary();
 				touch.Reset();
 				break;
 			case 6:
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_SELECT);
 				RunControlsPage(gameName, freezeSnap);
 				touch.Reset();
 				break;
 			case 7:
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_SELECT);
 				s_resetRequested = true;
 				CPU_Halt("Reset from menu");
 				exitMenu = true;
 				break;
 			case 8:
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_SELECT);
 				s_resetRequested = false;
 				CPU_Halt("Closed from menu");
 				exitMenu = true;
 				break;
 			case 9:
+				FrontendAudio::PlaySfx(FrontendAudio::SFX_BACK);
 				s_resetRequested = false;
 				shouldQuit = true;
 				CPU_Halt("Exit from menu");

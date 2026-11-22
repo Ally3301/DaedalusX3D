@@ -31,6 +31,7 @@ A fork of **DaedalusX64** focused and tuned specifically for **Nintendo 3DS Old 
 ### Roadmap
 - [x] **Graphics backend migration (`picaGL` → `citro3d` / native PICA200)** — shipped in `v0.1.0-Stable`.
 - [x] **Core 1/2 async HLE audio offload & selective DynaRec invalidation** — shipped in `v0.1.0-Stable`.
+- [ ] **Original UI & visual asset redesign** — replace the current `ctr64`-derived UI layout/assets with a fully original design (as requested by `ctr64`'s author, `gl91306`).
 - [ ] Further per-game compatibility and Old 3DS bandwidth tuning.
 
 ---
@@ -123,5 +124,14 @@ sh tests/ctr_host/run.sh
 - [`tests/`](tests/) — Host unit test suite (`ctr_host`).
 - [`releases/`](releases/) — Staging directory for release binaries (`.3dsx` / `.cia`).
 
+## Credits & Acknowledgments
+
+Full attribution and third-party license details are documented in [`CREDITS.md`](CREDITS.md).
+
+- **[DaedalusX64](https://github.com/DaedalusX64/daedalus) & [DaedalusX64-3DS](https://github.com/masterfeizz/DaedalusX64-3DS)** (*StrmnNrmn*, *MasterFeizz*, and contributors) — upstream Nintendo 64 emulator codebase and original 3DS port (`GPL-2.0-or-later`).
+- **[ctr64](https://github.com/gl91306/ctr64)** by **gl91306** (`GPL-2.0-or-later`) — credit for the current dual-screen frontend UI design, styling, 3×3 pause menu layout, and visual assets, as well as 3DS ARM DynaRec optimization references. *(Per `gl91306`'s request, the ctr64-derived UI design and assets will be replaced with an original design in a future update.)*
+- **[Mupen64Plus](https://github.com/mupen64plus/mupen64plus-core) & [Mupen64Plus-Next](https://github.com/libretro/mupen64plus-libretro-nx)** (*Richard Goedeken / Richard42*, *Sven Eckelmann*, *Hacktarux*, **Ari64**, and contributors; `GPL-2.0-or-later`) — reference and implementations for ARM dynamic recompiler (`new_dynarec` by Ari64) techniques and N64 R4300i/RSP emulation behavior.
+- **[devkitPro](https://devkitpro.org/) / devkitARM / libctru / citro3d** (`zlib`), **libpng / zlib**, **stb_truetype.h** (`MIT / Public Domain`), **Roboto-Medium.ttf** (`Apache-2.0`), and **[libretro-thumbnails](https://github.com/libretro-thumbnails/libretro-thumbnails)**.
+
 ## License
-Based on **DaedalusX64** under the GNU GPL v2 license ([`copying.txt`](copying.txt)).
+Distributed under the **GNU General Public License v2.0 or later (`GPL-2.0-or-later`)** — see [`copying.txt`](copying.txt) and [`CREDITS.md`](CREDITS.md). Upstream and referenced projects (**DaedalusX64**, **ctr64**, and **Mupen64Plus / Mupen64Plus-Next**) are licensed under `GPL-2.0-or-later`, and full corresponding source code is provided with all distributed binaries. This repository does not host any copyrighted ROMs or commercial game assets.

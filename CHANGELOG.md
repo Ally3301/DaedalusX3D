@@ -4,6 +4,25 @@ All notable changes to **DaedalusX3D (Old 3DS Edition)** are documented in this 
 
 ---
 
+## [v0.1.2-Stable] — 2026-11-22
+
+> **Note: The current frontend UI was based on [ctr64](https://github.com/gl91306/ctr64) by `gl91306` and will receive a full rework of both its visual assets and design eventually.**
+
+### Frontend Audio (Zero CPU Overhead)
+- **Hardware DSP ambient music & UI sound effects (`FrontendAudio`)**: added a seamless hardware-looping ambient soundtrack (Channel 1) and 2-voice polyphonic UI sound effects (`move`, `select`, `back`, `toggle`, `launch`, `error` on Channels 2–3) running directly on the Nintendo 3DS TeakLite DSP (`ndsp`) with **0% ARM11 CPU overhead** and **0 bytes of RAM / 0 DSP channels used during gameplay** (all buffers are released before emulation starts).
+- **Optional SD card overrides**: supports custom PCM16 `.wav` files placed in `sdmc:/3ds/DaedalusX64/Audio/` (`ambient.wav`, `move.wav`, `select.wav`, `back.wav`, `toggle.wav`, `launch.wav`, `error.wav`).
+- **ROM Selector Options button fix**: fixed the `X` button and bottom-bar touch hitbox so Options opens reliably even when no ROMs are present.
+
+### Documentation & Credits
+- **Expanded credits & license clarity ([`CREDITS.md`](CREDITS.md), [`README.md`](README.md), [`README.pt-BR.md`](README.pt-BR.md))**: added full attribution and `GPL-2.0-or-later` compliance notes for **DaedalusX64 / DaedalusX64-3DS**, **ctr64** (`gl91306` — UI & ARM DynaRec references), **Mupen64Plus / Mupen64Plus-Next** (including **Ari64**'s ARM DynaRec), and third-party libraries/assets.
+- **Explicit notice & roadmap commitment**: **the UI was based on CTR64 and will receive a rework of both its assets and design eventually.**
+
+### Release Artifacts
+- `DaedalusX64.3dsx` — Homebrew Launcher (`sdmc:/3ds/DaedalusX64/DaedalusX64.3dsx`)
+- `DaedalusX64.cia` — Home Menu installation via **FBI**
+
+---
+
 ## [v0.1.1-Stable] — 2026-11-20
 
 Major frontend overhaul delivering a native Nintendo 3DS / CTR64-inspired visual design, interactive bottom-screen physical-extension controls during gameplay, automatic on-device Wi-Fi box-art scraping, frosted frozen-game pause overlay, and critical ARM DynaRec 64-bit FPU compatibility fixes.
