@@ -231,7 +231,6 @@ float s_hlVel          = 0.0f;
 float s_hlX            = 16.0f, s_hlVX = 0.0f;
 float s_hlY            = 38.0f, s_hlVY = 0.0f;
 float s_scrollPos      = 0.0f;
-float s_scrollVel      = 0.0f;
 float s_vcAnimTime     = 0.0f;
 bool  s_initialised    = false;
 bool  s_resetRequested = false;
@@ -450,16 +449,38 @@ void RequestPreviewForRom(int romIdx, bool immediate = false)
 {
 	if (romIdx == s_previewRomIdx && s_previewPendingRomIdx == -1)
 		return;
+
+	// If the requested ROM's cover is already resident in the visible 2x3 grid cache,
+	// adopt it immediately with zero delay and zero disk I/O (prevents previous cover ghosting).
+	for (int slot = 0; slot < kGridPageSize; ++slot)
+	{
+		if (s_gridTexRomIdx[slot] == romIdx && s_gridTex[slot] != nullptr && s_gridTex[slot]->HasData())
+		{
+			s_previewTex           = s_gridTex[slot];
+			s_previewRomIdx        = romIdx;
+			s_previewPendingRomIdx = -1;
+			s_previewDelayFrames   = 0;
+			return;
+		}
+	}
+
+	// Never leave the previous ROM's texture bound while waiting for a different ROM to load.
+	if (s_previewRomIdx != romIdx)
+	{
+		s_previewTex    = nullptr;
+		s_previewRomIdx = -1;
+	}
+
 	if (immediate)
 	{
 		s_previewPendingRomIdx = romIdx;
-		s_previewDelayFrames = 0;
+		s_previewDelayFrames   = 0;
 		return;
 	}
 	if (s_previewPendingRomIdx != romIdx)
 	{
 		s_previewPendingRomIdx = romIdx;
-		s_previewDelayFrames = 8;
+		s_previewDelayFrames   = 2;
 	}
 }
 
@@ -677,18 +698,6 @@ const char * ViewportName(int v)
 	case VT_SCALED_4_3:    return "4:3 Scaled";
 	}
 	return "?";
-}
-
-void DrawTopStatusHeader(const char * leftTitle, const ThemePalette & t)
-{
-	Quad(0.0f, 0.0f, 400.0f, 24.0f, t.headerBg);
-	Quad(0.0f, 24.0f, 400.0f, 1.0f, t.headerRule);
-	Text(FONT_TITLE, 10.0f, 4.0f, leftTitle, t.text, 0.92f);
-
-	DrawBatteryIcon(374.0f, 8.0f, s_sysStatus.batteryLevel, s_sysStatus.charging, t.textMuted);
-	if (s_sysStatus.clockText[0])
-		TextRight(FONT_BODY, 368.0f, 6.0f, s_sysStatus.clockText, t.textMuted, 0.88f);
-	TextRight(FONT_BODY, 330.0f, 6.0f, isN3DS ? "N3DS" : "O3DS", t.textDim, 0.85f);
 }
 
 // ============================================================================
@@ -1147,61 +1156,83 @@ static void Draw3DN64Cartridge(const CRefPtr<CNativeTexture> & coverTex,
 	}
 }
 
+static void DrawTopRightStatusPill(const ThemePalette & t)
+{
+	const float px = 212.0f, py = 9.0f, pw = 178.0f, ph = 20.0f;
+	const uint32_t pillBg  = t.isLight ? RGBA(255, 255, 255, 224) : WithAlpha(t.headerBg, 205);
+	const uint32_t pillRim = WithAlpha(t.cardBorder, t.isLight ? 210 : 145);
+	RoundedRect(px, py, pw, ph, 10.0f, pillBg);
+	RoundedBorder1(px, py, pw, ph, 10.0f, pillRim);
+
+	Text(FONT_BODY, px + 11.0f, py + 3.5f, "DaedalusX3D", t.text, 0.80f);
+	Quad(306.0f, py + 4.5f, 1.0f, 11.0f, WithAlpha(t.cardBorder, 190));
+	if (s_sysStatus.clockText[0])
+		TextRight(FONT_BODY, 358.0f, py + 3.5f, s_sysStatus.clockText, t.textMuted, 0.82f);
+	DrawBatteryIcon(364.0f, py + 6.0f, s_sysStatus.batteryLevel, s_sysStatus.charging, t.n64Green);
+}
+
 static void DrawVirtualConsoleTopStage(const FrontendRomInfo * rom,
                                        const CRefPtr<CNativeTexture> & coverTex,
-                                       float infoEase, float animTime)
+                                       float infoEase, float animTime,
+                                       const ThemePalette & t)
 {
-	// Sleek dark reflective Virtual Console studio backdrop with soft center stage lighting
-	QuadVGrad(0.0f, 0.0f, 400.0f, 148.0f, RGBA(15, 19, 27), RGBA(30, 36, 48));
-	QuadVGrad(0.0f, 148.0f, 400.0f, 92.0f, RGBA(35, 42, 55), RGBA(14, 17, 24));
-	// Soft studio rim glow behind the floating 3D collectibles (no harsh razor line)
-	QuadVGrad(0.0f, 138.0f, 400.0f, 10.0f, RGBA(82, 102, 136, 0),  RGBA(82, 102, 136, 36));
-	QuadVGrad(0.0f, 148.0f, 400.0f, 14.0f, RGBA(82, 102, 136, 32), RGBA(82, 102, 136, 0));
+	// Theme-aware reflective studio backdrop with soft atmospheric horizon glow
+	const uint32_t skyTop   = t.isLight ? RGBA(238, 242, 248) : LerpColor(t.headerBg, RGBA(0, 0, 0), 0.25f);
+	const uint32_t skyBot   = t.isLight ? RGBA(218, 225, 238) : LerpColor(t.bg, t.cardBg, 0.45f);
+	const uint32_t floorTop = t.isLight ? RGBA(208, 216, 230) : LerpColor(t.bg, t.cardBg, 0.65f);
+	const uint32_t floorBot = t.isLight ? RGBA(232, 236, 244) : LerpColor(t.headerBg, RGBA(0, 0, 0), 0.35f);
+	const uint32_t glowCol  = WithAlpha(t.accent, t.isLight ? 26 : 30);
 
-	// Top Bar: Official Red "NINTENDO 64 CLASSICS" pill on left + clock & green 3DS battery on right
-	RoundedRectVGrad(12.0f, 8.0f, 138.0f, 20.0f, 10.0f, RGBA(232, 32, 42), RGBA(186, 16, 26));
-	RoundedBorder1(12.0f, 8.0f, 138.0f, 20.0f, 10.0f, RGBA(255, 118, 126, 170));
-	TextCentered(FONT_BODY, 81.0f, 11.5f, "NINTENDO 64 CLASSICS", RGBA(255, 255, 255), 0.80f);
+	QuadVGrad(0.0f, 0.0f, 400.0f, 146.0f, skyTop, skyBot);
+	QuadVGrad(0.0f, 146.0f, 400.0f, 94.0f, floorTop, floorBot);
+	QuadVGrad(0.0f, 134.0f, 400.0f, 12.0f, WithAlpha(t.accent, 0), glowCol);
+	QuadVGrad(0.0f, 146.0f, 400.0f, 16.0f, WithAlpha(t.accent, t.isLight ? 20 : 24), WithAlpha(t.accent, 0));
 
-	if (s_sysStatus.clockText[0])
-		TextRight(FONT_BODY, 358.0f, 11.0f, s_sysStatus.clockText, RGBA(236, 240, 248), 0.92f);
-	DrawBatteryIcon(366.0f, 13.5f, s_sysStatus.batteryLevel, s_sysStatus.charging, RGBA(52, 214, 108));
+	DrawTopRightStatusPill(t);
 
 	if (!rom)
 	{
-		TextCentered(FONT_TITLE, 200.0f, 102.0f, "DaedalusX3D", RGBA(244, 248, 255), 1.25f);
-		TextCentered(FONT_BODY, 200.0f, 132.0f, "Nintendo 64 Classics for Nintendo 3DS", RGBA(158, 170, 192), 0.92f);
+		TextCentered(FONT_TITLE, 200.0f, 102.0f, "DaedalusX3D", t.text, 1.25f);
+		TextCentered(FONT_BODY, 200.0f, 132.0f, "Nintendo 64 Emulator for Nintendo 3DS", t.textMuted, 0.92f);
 		return;
 	}
 
-	// Smooth Virtual Console 3D entrance & floating Idle Animation
+	// Smooth 3D entrance & floating Idle Animation
 	// Box turns inward to the right (yaw < 0 -> shows Left Red N64 Spine + Front Cover + Top Lid)
 	// Cartridge turns inward to the left (yaw > 0 -> shows Right Grooved Side Wall + Arch + Label)
-	const float slideOffset = (1.0f - infoEase) * 24.0f;
-	const float bobBox  = sinf(animTime * 2.0f) * 2.0f;
-	const float bobCart = cosf(animTime * 1.85f + 0.7f) * 1.8f;
-	const float yawBox  = -0.45f + 0.055f * sinf(animTime * 1.25f) - (1.0f - infoEase) * 0.35f;
-	const float pitBox  =  0.12f + 0.022f * cosf(animTime * 1.05f);
-	const float yawCart =  0.38f + 0.055f * cosf(animTime * 1.20f) + (1.0f - infoEase) * 0.35f;
-	const float pitCart =  0.12f + 0.022f * sinf(animTime * 1.00f);
+	const float slideOffset = (1.0f - infoEase) * 20.0f;
+	const float bobBox  = sinf(animTime * 2.0f) * 1.9f;
+	const float bobCart = cosf(animTime * 1.85f + 0.7f) * 1.7f;
+	const float yawBox  = -0.44f + 0.052f * sinf(animTime * 1.25f) - (1.0f - infoEase) * 0.30f;
+	const float pitBox  =  0.12f + 0.020f * cosf(animTime * 1.05f);
+	const float yawCart =  0.37f + 0.052f * cosf(animTime * 1.20f) + (1.0f - infoEase) * 0.30f;
+	const float pitCart =  0.12f + 0.020f * sinf(animTime * 1.00f);
 
-	// Render 3D N64 Retail Box on the left & 3D N64 Game Pak Cartridge on the right!
-	Draw3DN64Box(coverTex, 122.0f - slideOffset, 98.0f + bobBox, yawBox, pitBox, infoEase);
-	Draw3DN64Cartridge(coverTex, 282.0f + slideOffset, 103.0f + bobCart, yawCart, pitCart, infoEase);
+	// Render 3D N64 Retail Box on the left & 3D N64 Game Pak Cartridge on the right
+	Draw3DN64Box(coverTex, 122.0f - slideOffset, 93.0f + bobBox, yawBox, pitBox, infoEase);
+	Draw3DN64Cartridge(coverTex, 282.0f + slideOffset, 98.0f + bobCart, yawCart, pitCart, infoEase);
 
-	// Centered Game Title & 3 Metallic Glass Pills at bottom center
-	TextCenteredEllipsis(FONT_TITLE, 200.0f, 176.0f, 364.0f,
-	                     rom->title, ScaleAlpha(RGBA(248, 250, 255), infoEase), 1.14f);
+	// Centered Game Title with subtle legibility shadow & 3 themed glass metadata pills
+	if (!t.isLight)
+	{
+		TextCenteredEllipsis(FONT_TITLE, 200.0f, 173.0f, 368.0f,
+		                     rom->title, ScaleAlpha(RGBA(4, 7, 14, 185), infoEase), 1.12f);
+	}
+	TextCenteredEllipsis(FONT_TITLE, 200.0f, 172.0f, 368.0f,
+	                     rom->title, ScaleAlpha(t.text, infoEase), 1.12f);
 
 	char sizeStr[24];
 	snprintf(sizeStr, sizeof(sizeStr), "%.0f MB", fmaxf(1.0f, rom->size / (1024.0f * 1024.0f)));
-	const uint32_t pillFill   = ScaleAlpha(RGBA(30, 36, 48, 215), infoEase);
-	const uint32_t pillBorder = ScaleAlpha(RGBA(116, 132, 160, 175), infoEase);
-	const uint32_t pillText   = ScaleAlpha(RGBA(228, 236, 248), infoEase);
+	const uint32_t pillFill   = ScaleAlpha(WithAlpha(t.cardBg, t.isLight ? 235 : 222), infoEase);
+	const uint32_t pillBorder = ScaleAlpha(WithAlpha(t.cardBorder, 185), infoEase);
+	const uint32_t pillText   = ScaleAlpha(t.text, infoEase);
 
-	DrawPill(104.0f, 206.0f, 52.0f, 19.0f, sizeStr, pillFill, pillBorder, pillText, 0.80f);
-	DrawPill(162.0f, 206.0f, 76.0f, 19.0f, rom->country[0] ? rom->country : "N64", pillFill, pillBorder, pillText, 0.80f);
-	DrawPill(244.0f, 206.0f, 56.0f, 19.0f, "60 FPS", pillFill, pillBorder, pillText, 0.80f);
+	DrawPill(94.0f,  204.0f, 64.0f, 19.0f, sizeStr, pillFill, pillBorder, pillText, 0.80f);
+	DrawPill(166.0f, 204.0f, 68.0f, 19.0f, rom->country[0] ? rom->country : "N64", pillFill, pillBorder, pillText, 0.80f);
+	DrawPill(242.0f, 204.0f, 64.0f, 19.0f, "60 FPS",
+	         ScaleAlpha(t.isLight ? RGBA(220, 248, 232, 235) : WithAlpha(LerpColor(t.cardBg, t.n64Green, 0.18f), 225), infoEase),
+	         ScaleAlpha(WithAlpha(t.n64Green, 160), infoEase),
+	         ScaleAlpha(t.isLight ? RGBA(20, 128, 66) : LerpColor(t.n64Green, RGBA(255, 255, 255), 0.35f), infoEase), 0.80f);
 }
 
 // Render the frozen game screenshot on the top screen with an animated frosted overlay.
@@ -1725,18 +1756,18 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 		SpringStep(scrollPos, scrollVel, scrollTarget, 260.0f, 26.0f);
 		SpringStep(hlY, hlVY, (float)rowSel, 320.0f, 26.0f);
 
-		// Dark Virtual Console Palette for the Suspend & System Settings Screen
-		const uint32_t vcBg       = RGBA(20, 25, 34);
-		const uint32_t vcHeader   = RGBA(14, 18, 25);
-		const uint32_t vcRail     = RGBA(24, 30, 42);
-		const uint32_t vcTabIdle  = RGBA(28, 35, 48);
-		const uint32_t vcTabAct   = RGBA(42, 52, 70);
-		const uint32_t vcBorder   = RGBA(54, 66, 86);
-		const uint32_t vcSlotCard = RGBA(230, 235, 244);
-		const uint32_t vcSlotSel  = RGBA(246, 249, 255);
-		const uint32_t vcSlotTxt  = RGBA(24, 30, 42);
-		const uint32_t vcCyan     = RGBA(0, 212, 248);
+		// Theme-driven palette for the Suspend & System Settings Screen (supports Dark, Light, Midnight, Stealth)
 		const ThemePalette & t    = ActiveTheme();
+		const uint32_t vcBg       = t.bg;
+		const uint32_t vcHeader   = t.headerBg;
+		const uint32_t vcRail     = t.bgStripe;
+		const uint32_t vcTabIdle  = t.cardBg;
+		const uint32_t vcTabAct   = t.focusFill;
+		const uint32_t vcBorder   = t.cardBorder;
+		const uint32_t vcSlotCard = t.cardBg;
+		const uint32_t vcSlotSel  = t.focusFill;
+		const uint32_t vcSlotTxt  = t.text;
+		const uint32_t vcCyan     = t.focusBorder;
 
 		BeginFrame();
 
@@ -1745,14 +1776,17 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 		// ====================================================================
 		BeginScreen(GFX_BOTTOM, 320, 240, vcBg);
 		Quad(0.0f, 0.0f, 320.0f, 240.0f, vcBg);
+		DrawBackdrop(320.0f, 240.0f, t);
 		Quad(0.0f, 0.0f, 320.0f, 31.0f, vcHeader);
-		Quad(0.0f, 31.0f, 320.0f, 1.0f, vcBorder);
+		Quad(0.0f, 31.0f, 320.0f, 1.0f, t.headerRule);
 
-		// Left [L] and Right [R] shoulder badges
-		RoundedRect(4.0f, 6.0f, 20.0f, 20.0f, 5.0f, RGBA(182, 190, 204));
-		TextCentered(FONT_BODY, 14.0f, 9.5f, "L", RGBA(24, 30, 40), 0.80f);
-		RoundedRect(296.0f, 6.0f, 20.0f, 20.0f, 5.0f, RGBA(182, 190, 204));
-		TextCentered(FONT_BODY, 306.0f, 9.5f, "R", RGBA(24, 30, 40), 0.80f);
+		// Left [L] and Right [R] shoulder badges (themed)
+		RoundedRect(4.0f, 6.0f, 20.0f, 20.0f, 5.0f, t.cardBgAlt);
+		RoundedBorder1(4.0f, 6.0f, 20.0f, 20.0f, 5.0f, vcBorder);
+		TextCentered(FONT_BODY, 14.0f, 9.5f, "L", t.text, 0.80f);
+		RoundedRect(296.0f, 6.0f, 20.0f, 20.0f, 5.0f, t.cardBgAlt);
+		RoundedBorder1(296.0f, 6.0f, 20.0f, 20.0f, 5.0f, vcBorder);
+		TextCentered(FONT_BODY, 306.0f, 9.5f, "R", t.text, 0.80f);
 
 		// 5 Folder Tabs across x = 27..293
 		for (int tb = 0; tb < TAB_COUNT; ++tb)
@@ -1763,12 +1797,12 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 			RoundedRect(tx, isAct ? 3.0f : 6.0f, tw, isAct ? 28.0f : 24.0f, 6.0f, isAct ? vcTabAct : vcTabIdle);
 			RoundedBorder1(tx, isAct ? 3.0f : 6.0f, tw, isAct ? 28.0f : 24.0f, 6.0f, isAct ? vcCyan : vcBorder);
 			TextCentered(FONT_BODY, tx + tw * 0.5f, isAct ? 10.5f : 11.5f, kTabTitles[tb],
-			             isAct ? RGBA(255, 255, 255) : RGBA(162, 174, 194), 0.78f);
+			             isAct ? t.text : t.textMuted, 0.78f);
 		}
 
 		// Left Vertical Action Rail (x = 0..52, y = 32..240)
 		Quad(0.0f, 32.0f, 52.0f, 208.0f, vcRail);
-		Quad(52.0f, 32.0f, 1.0f, 208.0f, vcBorder);
+		Quad(52.0f, 32.0f, 1.0f, 208.0f, t.headerRule);
 
 		const EIconId railIcons[5] = {
 			ICON_SAVE,
@@ -1784,29 +1818,30 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 			                     (ri == 3 && !inGame && activeTab != TAB_STATES);
 			const bool railPrs = (ri == pressedRail);
 			RoundedRect(7.0f, ry, 38.0f, 32.0f, 12.0f,
-			            railPrs ? RGBA(52, 68, 94) : (railSel ? RGBA(44, 56, 78) : RGBA(32, 40, 54)));
+			            railPrs ? t.focusFill : (railSel ? t.cardBgAlt : t.cardBg));
 			RoundedBorder1(7.0f, ry, 38.0f, 32.0f, 12.0f,
-			               railSel ? RGBA(190, 204, 226) : vcBorder);
+			               railSel ? vcCyan : vcBorder);
 			Icon(railIcons[ri], 17.0f, ry + 7.0f, 18.0f,
-			     railSel ? RGBA(255, 255, 255) : RGBA(184, 196, 214));
+			     railSel ? t.accent : t.iconMuted);
 		}
 
 		// Right Stage (x = 58..314, y = 36..234)
 		if (activeTab == TAB_STATES)
 		{
-			// 5 Tactile Save-State Cards with Controller Pak icon + direct [Save] & [Load] pill buttons
+			// 5 Tactile Save-State Cards (fully theme-aware — sleek dark in dark themes, crisp white in light)
 			for (int s = 0; s < 5; ++s)
 			{
 				const float sy = 36.0f + s * 39.0f;
 				const bool isSel = (s == rowSel);
 				const bool saved = slotExists[s];
 
-				RoundedRect(60.0f, sy + 2.0f, 252.0f, 34.0f, 9.0f, RGBA(0, 0, 0, 95));
+				if ((t.cardShadow >> 24) > 0)
+					RoundedRect(60.0f, sy + 2.0f, 252.0f, 34.0f, 9.0f, t.cardShadow);
 				RoundedRect(60.0f, sy, 252.0f, 34.0f, 9.0f, isSel ? vcSlotSel : vcSlotCard);
 				if (isSel)
 					RoundedBorder2(60.0f, sy, 252.0f, 34.0f, 9.0f, vcCyan);
 				else
-					RoundedBorder1(60.0f, sy, 252.0f, 34.0f, 9.0f, RGBA(180, 190, 206));
+					RoundedBorder1(60.0f, sy, 252.0f, 34.0f, 9.0f, vcBorder);
 
 				char slotLbl[16];
 				snprintf(slotLbl, sizeof(slotLbl), "Slot %d", s + 1);
@@ -1814,22 +1849,22 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 
 				// Miniature N64 Controller Pak badge
 				RoundedRect(138.0f, sy + 6.0f, 22.0f, 22.0f, 5.0f,
-				            saved ? RGBA(34, 168, 92) : RGBA(142, 150, 164));
-				Icon(ICON_SAVE, 141.0f, sy + 9.0f, 16.0f, RGBA(255, 255, 255));
+				            saved ? t.n64Green : t.badgeBg);
+				Icon(ICON_SAVE, 141.0f, sy + 9.0f, 16.0f, saved ? RGBA(255, 255, 255) : t.iconMuted);
 
 				// Direct [Save] Pill Button (x = 174..236)
 				const bool focSave = isSel && (slotBtnCol == 0);
 				DrawPill(174.0f, sy + 6.0f, 62.0f, 22.0f, "Save",
-				         focSave ? RGBA(24, 118, 238) : RGBA(214, 220, 232),
-				         focSave ? vcCyan : RGBA(168, 178, 194),
-				         focSave ? RGBA(255, 255, 255) : vcSlotTxt, 0.84f);
+				         focSave ? t.n64Blue : t.cardBgAlt,
+				         focSave ? vcCyan : vcBorder,
+				         focSave ? RGBA(255, 255, 255) : t.text, 0.84f);
 
 				// Direct [Load] Pill Button (x = 242..304)
 				const bool focLoad = isSel && (slotBtnCol == 1);
 				DrawPill(242.0f, sy + 6.0f, 62.0f, 22.0f, "Load",
-				         focLoad ? RGBA(24, 168, 88) : (saved ? RGBA(214, 220, 232) : RGBA(224, 228, 236)),
-				         focLoad ? vcCyan : RGBA(168, 178, 194),
-				         focLoad ? RGBA(255, 255, 255) : (saved ? vcSlotTxt : RGBA(144, 152, 166)), 0.84f);
+				         focLoad ? t.n64Green : (saved ? t.cardBgAlt : t.bg),
+				         focLoad ? vcCyan : vcBorder,
+				         focLoad ? RGBA(255, 255, 255) : (saved ? t.text : t.textDim), 0.84f);
 			}
 		}
 		else
@@ -1847,7 +1882,7 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 				if (ry + kRowH < 33.0f || ry > 236.0f)
 					continue;
 				const bool isSel = (r == rowSel);
-				RoundedRect(60.0f, ry, 244.0f, kRowH, 8.0f, isSel ? RGBA(30, 56, 88) : vcTabIdle);
+				RoundedRect(60.0f, ry, 244.0f, kRowH, 8.0f, isSel ? t.focusFill : vcTabIdle);
 				RoundedBorder1(60.0f, ry, 244.0f, kRowH, 8.0f, isSel ? vcCyan : vcBorder);
 
 				const char * label = "";
@@ -1901,22 +1936,22 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 				}
 
 				Text(FONT_BODY, 70.0f, ry + 8.0f, label,
-				     isSel ? RGBA(255, 255, 255) : RGBA(204, 214, 232), 0.92f);
+				     isSel ? t.text : (t.isLight ? t.text : t.textMuted), 0.92f);
 
 				if (isBool)
 				{
 					DrawPill(248.0f, ry + 5.5f, 48.0f, 20.0f, isOn ? "ON" : "OFF",
-					         isOn ? RGBA(24, 168, 88) : RGBA(44, 54, 72),
-					         isOn ? RGBA(68, 224, 132) : vcBorder,
-					         RGBA(255, 255, 255), 0.82f);
+					         isOn ? t.n64Green : t.cardBgAlt,
+					         isOn ? WithAlpha(LerpColor(t.n64Green, RGBA(255, 255, 255), 0.35f), 200) : vcBorder,
+					         isOn ? RGBA(255, 255, 255) : t.textMuted, 0.82f);
 				}
 				else
 				{
 					const float pw = fmaxf(56.0f, MeasureText(FONT_BODY, valStr, 0.82f) + 16.0f);
 					DrawPill(296.0f - pw, ry + 5.5f, pw, 20.0f, valStr,
-					         isSel ? RGBA(24, 118, 238) : RGBA(42, 52, 70),
+					         isSel ? t.n64Blue : t.cardBgAlt,
 					         isSel ? vcCyan : vcBorder,
-					         RGBA(255, 255, 255), 0.82f);
+					         isSel ? RGBA(255, 255, 255) : t.text, 0.82f);
 				}
 			}
 
@@ -1925,75 +1960,77 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 				RoundedBorder2(60.0f, hy, 244.0f, kRowH, 8.0f, vcCyan);
 			SetClipRect(false, 0, 0, 320, 240, 320, 240);
 
-			// Vertical 3DS Scrollbar Track & Glowing Cyan Thumb when tab has > 5 items
+			// Sleek Vertical Scrollbar Track & Translucent Thumb when tab has > 5 items
 			if (itemCount > kVisRows)
 			{
-				const float trkX = 310.0f, trkY = 38.0f, trkW = 4.0f, trkH = 174.0f;
-				RoundedRect(trkX, trkY, trkW, trkH, 2.0f, RGBA(32, 40, 54));
-				const float thumbH = fmaxf(28.0f, trkH * ((float)kVisRows / (float)itemCount));
+				const float trkX = 311.0f, trkY = 38.0f, trkW = 3.0f, trkH = 176.0f;
+				RoundedRect(trkX, trkY, trkW, trkH, 1.5f, WithAlpha(vcBorder, 140));
+				const float thumbH = fmaxf(26.0f, trkH * ((float)kVisRows / (float)itemCount));
 				const float thumbY = trkY + (trkH - thumbH) * fminf(1.0f, fmaxf(0.0f, scrollPos / maxScroll));
-				RoundedRect(trkX, thumbY, trkW, thumbH, 2.0f, vcCyan);
+				RoundedRect(trkX, thumbY, trkW, thumbH, 1.5f, WithAlpha(vcCyan, 215));
 			}
 		}
 
 		if (toastFrames > 0)
 		{
-			RoundedRect(68.0f, 208.0f, 236.0f, 24.0f, 10.0f, RGBA(10, 14, 22, 240));
-			RoundedBorder1(68.0f, 208.0f, 236.0f, 24.0f, 10.0f, vcCyan);
-			TextCentered(FONT_BODY, 186.0f, 213.0f, toast, RGBA(244, 248, 255), 0.84f);
+			RoundedRect(68.0f, 208.0f, 236.0f, 24.0f, 10.0f, WithAlpha(t.hintBg, 240));
+			RoundedBorder1(68.0f, 208.0f, 236.0f, 24.0f, 10.0f, WithAlpha(vcCyan, 190));
+			TextCentered(FONT_BODY, 186.0f, 213.0f, toast, t.hintText, 0.84f);
 			--toastFrames;
 		}
 
 		// ====================================================================
-		// TOP SCREEN (400x240): Frosted Gameplay / Virtual Console Inspector
+		// TOP SCREEN (400x240): Frosted Gameplay / Settings Inspector
 		// ====================================================================
 		BeginScreen(GFX_TOP, 400, 240, vcBg);
 		DrawFrostedGameBackdrop(freezeSnap, ease, t);
 		if (freezeSnap == nullptr || !freezeSnap->HasData())
-			QuadVGrad(0.0f, 0.0f, 400.0f, 240.0f, RGBA(16, 20, 28), RGBA(26, 32, 44));
+			QuadVGrad(0.0f, 0.0f, 400.0f, 240.0f, t.headerBg, t.bg);
 
-		// Top Status Ribbon
-		RoundedRect(14.0f, 10.0f, 146.0f, 22.0f, 11.0f, RGBA(220, 18, 30));
-		TextCentered(FONT_BODY, 87.0f, 14.5f, inGame ? "VIRTUAL CONSOLE PAUSE" : "SYSTEM SETTINGS", RGBA(255, 255, 255), 0.80f);
+		DrawTopRightStatusPill(t);
 
-		RoundedRect(298.0f, 10.0f, 88.0f, 22.0f, 11.0f, RGBA(14, 18, 26, 210));
-		DrawBatteryIcon(360.0f, 16.5f, s_sysStatus.batteryLevel, s_sysStatus.charging, RGBA(52, 214, 108));
-		if (s_sysStatus.clockText[0])
-			TextRight(FONT_BODY, 354.0f, 14.5f, s_sysStatus.clockText, RGBA(236, 240, 248), 0.84f);
+		const uint32_t cardFill   = WithAlpha(t.cardBg, t.isLight ? 245 : 238);
+		const uint32_t cardBorder = t.cardBorder;
+		const uint32_t cardShadow = t.cardShadow;
 
 		if (activeTab == TAB_STATES)
 		{
-			const float banY = 126.0f + (1.0f - ease) * 20.0f;
-			RoundedRect(18.0f, banY, 364.0f, 96.0f, 12.0f, RGBA(14, 18, 26, 232));
-			RoundedBorder1(18.0f, banY, 364.0f, 96.0f, 12.0f, vcCyan);
+			const float banY = 122.0f + (1.0f - ease) * 18.0f;
+			if ((cardShadow >> 24) > 0)
+				RoundedRect(18.0f, banY + 2.0f, 364.0f, 98.0f, 12.0f, cardShadow);
+			RoundedRect(18.0f, banY, 364.0f, 98.0f, 12.0f, cardFill);
+			RoundedBorder1(18.0f, banY, 364.0f, 98.0f, 12.0f, cardBorder);
 
-			RoundedRect(30.0f, banY + 16.0f, 64.0f, 64.0f, 10.0f,
-			            slotExists[rowSel] ? RGBA(24, 118, 238) : RGBA(42, 52, 70));
-			Icon(ICON_SAVE, 48.0f, banY + 26.0f, 28.0f, RGBA(255, 255, 255));
-			TextCentered(FONT_BODY, 62.0f, banY + 58.0f, slotExists[rowSel] ? "SAVED" : "EMPTY",
-			             slotExists[rowSel] ? RGBA(247, 198, 22) : RGBA(162, 174, 194), 0.76f);
+			RoundedRect(30.0f, banY + 17.0f, 64.0f, 64.0f, 10.0f,
+			            slotExists[rowSel] ? t.n64Blue : t.badgeBg);
+			Icon(ICON_SAVE, 48.0f, banY + 27.0f, 28.0f, slotExists[rowSel] ? RGBA(255, 255, 255) : t.iconMuted);
+			TextCentered(FONT_BODY, 62.0f, banY + 59.0f, slotExists[rowSel] ? "SAVED" : "EMPTY",
+			             slotExists[rowSel] ? t.n64Yellow : t.textMuted, 0.76f);
 
-			TextEllipsis(FONT_TITLE, 108.0f, banY + 16.0f, 260.0f,
-			             (gameName && gameName[0]) ? gameName : "Nintendo 64", RGBA(246, 249, 255), 1.04f);
+			TextEllipsis(FONT_TITLE, 108.0f, banY + 17.0f, 260.0f,
+			             (gameName && gameName[0]) ? gameName : "Nintendo 64", t.text, 1.04f);
 			char slotInfo[96];
 			snprintf(slotInfo, sizeof(slotInfo), "Memory Pak Slot %d   |   %.1f FPS   |   %s",
 			         rowSel + 1, gCurrentFramerate,
 			         TouchPadEngine::LayoutShortName(touchCfg.layout));
-			Text(FONT_BODY, 108.0f, banY + 42.0f, slotInfo, vcCyan, 0.86f);
-			Text(FONT_BODY, 108.0f, banY + 62.0f, "Tap Save or Load on any slot card below, or press (B) to resume.",
-			     RGBA(172, 184, 204), 0.80f);
+			Text(FONT_BODY, 108.0f, banY + 43.0f, slotInfo, t.accent, 0.86f);
+			Text(FONT_BODY, 108.0f, banY + 63.0f, "Tap Save or Load on any slot card below, or press (B) to resume.",
+			     t.textMuted, 0.80f);
 		}
 		else if (activeTab == TAB_TOUCH)
 		{
-			const float cardY = 42.0f;
-			RoundedRect(20.0f, cardY, 360.0f, 182.0f, 12.0f, RGBA(14, 18, 26, 235));
-			RoundedBorder1(20.0f, cardY, 360.0f, 182.0f, 12.0f, vcCyan);
-			Text(FONT_TITLE, 36.0f, cardY + 14.0f, TouchPadEngine::LayoutName(touchCfg.layout), RGBA(246, 249, 255), 1.0f);
-			TextRight(FONT_BODY, 364.0f, cardY + 16.0f, touchCfg.leftHanded ? "Left-Handed" : "Right-Handed", vcCyan, 0.86f);
-			Quad(36.0f, cardY + 38.0f, 328.0f, 1.0f, vcBorder);
+			const float cardY = 40.0f;
+			if ((cardShadow >> 24) > 0)
+				RoundedRect(20.0f, cardY + 2.0f, 360.0f, 182.0f, 12.0f, cardShadow);
+			RoundedRect(20.0f, cardY, 360.0f, 182.0f, 12.0f, cardFill);
+			RoundedBorder1(20.0f, cardY, 360.0f, 182.0f, 12.0f, cardBorder);
+			RoundedRect(20.0f, cardY + 12.0f, 3.0f, 20.0f, 1.5f, t.accent);
+			Text(FONT_TITLE, 34.0f, cardY + 14.0f, TouchPadEngine::LayoutName(touchCfg.layout), t.text, 1.0f);
+			TextRight(FONT_BODY, 364.0f, cardY + 16.0f, touchCfg.leftHanded ? "Left-Handed" : "Right-Handed", t.accent, 0.86f);
+			Quad(34.0f, cardY + 39.0f, 330.0f, 1.0f, WithAlpha(vcBorder, 160));
 
-			const float pvX = 36.0f, pvY = cardY + 48.0f, pvW = 136.0f, pvH = 102.0f;
-			RoundedRect(pvX, pvY, pvW, pvH, 8.0f, RGBA(18, 22, 30));
+			const float pvX = 36.0f, pvY = cardY + 49.0f, pvW = 136.0f, pvH = 102.0f;
+			RoundedRect(pvX, pvY, pvW, pvH, 8.0f, t.bg);
 			RoundedBorder1(pvX, pvY, pvW, pvH, 8.0f, vcBorder);
 			if (touchCfg.layout != TOUCH_LAYOUT_SLEEP)
 			{
@@ -2002,13 +2039,13 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 				const float padPy = pvY + 54.0f;
 				RoundedRect(zPx, pvY + 18.0f, 36.0f, 32.0f, 5.0f, vcTabAct);
 				TextCentered(FONT_BODY, zPx + 18.0f, pvY + 27.0f, "Z", vcCyan, 0.86f);
-				Circle(padPx, padPy, 30.0f, vcTabIdle);
+				Circle(padPx, padPy, 30.0f, t.cardBgAlt);
 				if (touchCfg.layout == TOUCH_LAYOUT_CCROSS)
 				{
-					Circle(padPx, padPy - 17.0f, 8.5f, RGBA(245, 197, 24));
-					Circle(padPx, padPy + 17.0f, 8.5f, RGBA(245, 197, 24));
-					Circle(padPx - 17.0f, padPy, 8.5f, RGBA(245, 197, 24));
-					Circle(padPx + 17.0f, padPy, 8.5f, RGBA(245, 197, 24));
+					Circle(padPx, padPy - 17.0f, 8.5f, t.n64Yellow);
+					Circle(padPx, padPy + 17.0f, 8.5f, t.n64Yellow);
+					Circle(padPx - 17.0f, padPy, 8.5f, t.n64Yellow);
+					Circle(padPx + 17.0f, padPy, 8.5f, t.n64Yellow);
 				}
 				else
 				{
@@ -2022,32 +2059,45 @@ static void RunUnifiedMenu(const char * gameName, const RomID & romId, bool inGa
 				(touchCfg.layout == TOUCH_LAYOUT_DUAL_SHOOTER) ? "Twin-stick FPS mode: Touch aims N64 stick while Circle Pad strafes." :
 				(touchCfg.layout == TOUCH_LAYOUT_DPAD)         ? "Full N64 D-Pad Cross on touch screen." :
 				                                                 "Turns bottom screen off during gameplay to save battery.";
-			TextWrapped(FONT_BODY, 186.0f, cardY + 52.0f, 178.0f, 16.0f, desc, RGBA(194, 206, 226), 0.88f);
+			TextWrapped(FONT_BODY, 186.0f, cardY + 53.0f, 178.0f, 16.0f, desc, t.textMuted, 0.88f);
 		}
 		else
 		{
 			const int optIdx = GetMappedOptIdx(activeTab, rowSel);
-			const float cardY = 50.0f;
-			RoundedRect(22.0f, cardY, 356.0f, 148.0f, 12.0f, RGBA(14, 18, 26, 235));
-			RoundedBorder1(22.0f, cardY, 356.0f, 148.0f, 12.0f, vcCyan);
-
-			Text(FONT_TITLE, 38.0f, cardY + 16.0f, kOptions[optIdx].label, RGBA(246, 249, 255), 1.05f);
+			const float cardY = 44.0f;
 			const bool isLive = kOptions[optIdx].live;
-			DrawPill(306.0f, cardY + 15.0f, 56.0f, 18.0f, isLive ? "LIVE" : "BOOT",
-			         isLive ? RGBA(24, 168, 88, 60) : RGBA(245, 197, 24, 60),
-			         isLive ? RGBA(52, 214, 108) : RGBA(245, 197, 24),
-			         isLive ? RGBA(52, 214, 108) : RGBA(245, 197, 24), 0.78f);
+			const uint32_t badgeCol = isLive ? t.n64Green : t.n64Yellow;
 
-			Quad(38.0f, cardY + 42.0f, 324.0f, 1.0f, vcBorder);
-			TextWrapped(FONT_BODY, 38.0f, cardY + 54.0f, 324.0f, 17.0f, kOptions[optIdx].help, RGBA(196, 208, 228), 0.94f);
+			if ((cardShadow >> 24) > 0)
+				RoundedRect(22.0f, cardY + 2.0f, 356.0f, 152.0f, 12.0f, cardShadow);
+			RoundedRect(22.0f, cardY, 356.0f, 152.0f, 12.0f, cardFill);
+			RoundedBorder1(22.0f, cardY, 356.0f, 152.0f, 12.0f, cardBorder);
+			// Crisp left accent bar matching option apply mode
+			RoundedRect(22.0f, cardY + 13.0f, 3.0f, 22.0f, 1.5f, badgeCol);
+
+			Text(FONT_TITLE, 36.0f, cardY + 16.0f, kOptions[optIdx].label, t.text, 1.06f);
+			DrawPill(306.0f, cardY + 15.0f, 56.0f, 19.0f, isLive ? "LIVE" : "BOOT",
+			         WithAlpha(badgeCol, t.isLight ? 38 : 42),
+			         WithAlpha(badgeCol, 190),
+			         t.isLight ? LerpColor(badgeCol, RGBA(0, 0, 0), 0.35f) : badgeCol, 0.78f);
+
+			Quad(36.0f, cardY + 44.0f, 326.0f, 1.0f, WithAlpha(vcBorder, 160));
+			TextWrapped(FONT_BODY, 36.0f, cardY + 56.0f, 326.0f, 17.5f, kOptions[optIdx].help, t.textMuted, 0.93f);
 
 			// Old 3DS Performance Impact Bar
-			Text(FONT_BODY, 38.0f, cardY + 116.0f, "Old 3DS Speed Impact:", RGBA(247, 198, 22), 0.84f);
-			RoundedRect(178.0f, cardY + 118.0f, 180.0f, 10.0f, 5.0f, RGBA(28, 34, 46));
-			const float barW = 180.0f * (kOptionImpact[optIdx] / 100.0f);
-			RoundedRect(178.0f, cardY + 118.0f, barW, 10.0f, 5.0f, RGBA(38, 198, 104));
+			const int impact = kOptionImpact[optIdx];
+			const uint32_t barCol = (impact >= 60) ? t.n64Green :
+			                        (impact >= 25) ? t.accent : t.textMuted;
+			Text(FONT_BODY, 36.0f, cardY + 118.0f, "Old 3DS Speed Impact", t.textMuted, 0.82f);
+			RoundedRect(172.0f, cardY + 121.0f, 152.0f, 8.0f, 4.0f, t.bg);
+			RoundedBorder1(172.0f, cardY + 121.0f, 152.0f, 8.0f, 4.0f, WithAlpha(vcBorder, 160));
+			const float barW = fmaxf(8.0f, 152.0f * (impact / 100.0f));
+			RoundedRect(172.0f, cardY + 121.0f, barW, 8.0f, 4.0f, barCol);
+			char impPct[12];
+			snprintf(impPct, sizeof(impPct), "%d%%", impact);
+			TextRight(FONT_BODY, 362.0f, cardY + 118.0f, impPct, barCol, 0.82f);
 
-			Text(FONT_BODY, 24.0f, 212.0f, "(L/R) Switch Tab   |   (A) Toggle   |   (B) Save & Return", RGBA(162, 174, 194), 0.82f);
+			TextCentered(FONT_BODY, 200.0f, 212.0f, "(L/R) Switch Tab   |   (A) Toggle   |   (B) Save & Return", t.textMuted, 0.80f);
 		}
 
 		EndFrame();
@@ -2350,35 +2400,30 @@ std::string RunRomSelector()
 		// ====================================================================
 		// BOTTOM SCREEN (320x240): Authentic 3DS HOME Menu 2x3 Cartridge Shelf
 		// ====================================================================
-		const uint32_t homeBg       = t.isLight ? RGBA(230, 234, 240) : t.bg;
-		const uint32_t homeBorder   = t.isLight ? RGBA(194, 202, 214) : t.cardBorder;
-		const uint32_t homeTileOut  = t.isLight ? RGBA(238, 242, 248) : t.cardBg;
-		const uint32_t homeTileIn   = t.isLight ? RGBA(252, 253, 255) : t.cardBgAlt;
-		const uint32_t homeText     = t.isLight ? RGBA(38, 44, 54)    : t.text;
-		const uint32_t homeCyan     = RGBA(0, 218, 255);
-		const uint32_t homeCyanGlow = RGBA(0, 218, 255, 68);
+		const uint32_t homeBg       = t.bg;
+		const uint32_t homeBorder   = t.cardBorder;
+		const uint32_t homeTileOut  = t.cardBg;
+		const uint32_t homeTileIn   = t.cardBgAlt;
+		const uint32_t homeText     = t.text;
+		const uint32_t homeCyan     = t.focusBorder;
+		const uint32_t homeCyanGlow = WithAlpha(t.focusBorder, 34);
 
 		BeginScreen(GFX_BOTTOM, 320, 240, homeBg);
 		DrawBackdrop(320.0f, 240.0f, t);
 
 		// 1. Top L / All Games / Favorites / Recent / R Segmented Tab Bar (y = 0..30)
 		QuadVGrad(0.0f, 0.0f, 320.0f, 30.0f,
-		          t.isLight ? RGBA(246, 248, 252) : RGBA(28, 33, 44),
-		          t.isLight ? RGBA(232, 236, 244) : RGBA(20, 24, 33));
-		Quad(0.0f, 30.0f, 320.0f, 1.0f, homeBorder);
+		          t.headerBg, LerpColor(t.headerBg, t.bg, 0.5f));
+		Quad(0.0f, 30.0f, 320.0f, 1.0f, t.headerRule);
 
 		// Left [L] and Right [R] sculpted shoulder pills
-		RoundedRectVGrad(5.0f, 4.0f, 26.0f, 22.0f, 7.0f,
-		                 t.isLight ? RGBA(250, 252, 255) : RGBA(42, 48, 62),
-		                 t.isLight ? RGBA(226, 232, 242) : RGBA(30, 35, 46));
+		RoundedRectVGrad(5.0f, 4.0f, 26.0f, 22.0f, 7.0f, t.cardBgAlt, t.cardBg);
 		RoundedBorder1(5.0f, 4.0f, 26.0f, 22.0f, 7.0f, homeBorder);
-		TextCentered(FONT_BODY, 18.0f, 8.0f, "L", homeText, 0.86f);
+		TextCentered(FONT_BODY, 18.0f, 8.0f, "L", homeText, 0.84f);
 
-		RoundedRectVGrad(289.0f, 4.0f, 26.0f, 22.0f, 7.0f,
-		                 t.isLight ? RGBA(250, 252, 255) : RGBA(42, 48, 62),
-		                 t.isLight ? RGBA(226, 232, 242) : RGBA(30, 35, 46));
+		RoundedRectVGrad(289.0f, 4.0f, 26.0f, 22.0f, 7.0f, t.cardBgAlt, t.cardBg);
 		RoundedBorder1(289.0f, 4.0f, 26.0f, 22.0f, 7.0f, homeBorder);
-		TextCentered(FONT_BODY, 302.0f, 8.0f, "R", homeText, 0.86f);
+		TextCentered(FONT_BODY, 302.0f, 8.0f, "R", homeText, 0.84f);
 
 		for (int fi = 0; fi < FILTER_COUNT; ++fi)
 		{
@@ -2388,16 +2433,15 @@ std::string RunRomSelector()
 			if (isAct)
 			{
 				RoundedRectVGrad(fx, 4.0f, fw, 22.0f, 7.0f,
-				                 RGBA(28, 178, 248), RGBA(12, 118, 224));
-				RoundedBorder1(fx, 4.0f, fw, 22.0f, 7.0f, RGBA(128, 232, 255, 190));
+				                 t.accent, LerpColor(t.n64Blue, t.accent, 0.25f));
+				RoundedBorder1(fx, 4.0f, fw, 22.0f, 7.0f, WithAlpha(LerpColor(t.accent, RGBA(255, 255, 255), 0.45f), 175));
 			}
 			else
 			{
-				RoundedRect(fx, 4.0f, fw, 22.0f, 7.0f,
-				            t.isLight ? RGBA(224, 230, 240, 120) : RGBA(36, 42, 54, 110));
+				RoundedRect(fx, 4.0f, fw, 22.0f, 7.0f, WithAlpha(t.cardBg, 175));
 			}
 			TextCentered(FONT_BODY, fx + fw * 0.5f, 8.0f, kFilterNames[fi],
-			             isAct ? RGBA(255, 255, 255) : (t.isLight ? RGBA(76, 84, 98) : t.textMuted), 0.85f);
+			             isAct ? RGBA(255, 255, 255) : t.textMuted, 0.84f);
 		}
 
 		// 2. Center 2x3 3DS Home Menu Cartridge Tile Shelf (y = 36..196)
@@ -2430,10 +2474,11 @@ std::string RunRomSelector()
 				const bool pressed = (idx == pressedTile);
 
 				// Outer sculpted 3DS Home Menu squircle tile + soft drop shadow
-				RoundedRect(gx, gy + 2.5f, kTileW, kTileH, 14.0f, RGBA(10, 14, 24, t.isLight ? 34 : 110));
+				if ((t.cardShadow >> 24) > 0)
+					RoundedRect(gx, gy + 2.5f, kTileW, kTileH, 14.0f, t.cardShadow);
 				RoundedRectVGrad(gx, gy, kTileW, kTileH, 14.0f,
-				                 pressed ? homeBorder : (t.isLight ? RGBA(248, 250, 255) : RGBA(44, 50, 64)),
-				                 pressed ? homeTileOut : (t.isLight ? RGBA(226, 232, 242) : RGBA(28, 33, 44)));
+				                 pressed ? homeBorder : t.cardBgAlt,
+				                 pressed ? homeTileOut : t.cardBg);
 				RoundedBorder1(gx, gy, kTileW, kTileH, 14.0f, homeBorder);
 
 				// Inner recessed artwork well
@@ -2444,7 +2489,8 @@ std::string RunRomSelector()
 				RoundedRect(inX, inY, inW, inH, 8.0f, homeTileIn);
 
 				CRefPtr<CNativeTexture> tileTex = s_gridTex[slot];
-				if (idx == s_selected && s_previewTex != nullptr && s_previewTex->HasData())
+				if (idx == s_selected && s_previewRomIdx == s_viewOrder[idx] &&
+				    s_previewTex != nullptr && s_previewTex->HasData())
 					tileTex = s_previewTex;
 
 				if (tileTex != nullptr && tileTex->HasData())
@@ -2456,11 +2502,11 @@ std::string RunRomSelector()
 					TexturedQuad(tileTex->GetC3DTexture(),
 					             inX + 1.5f, inY + 1.5f, inW - 3.0f, inH - 3.0f,
 					             0.0f, 0.0f, u1, v1, RGBA(255, 255, 255));
-					// Subtle glossy 3DS icon top glass reflection
-					QuadVGrad(inX + 1.5f, inY + 1.5f, inW - 3.0f, (inH - 3.0f) * 0.34f,
-					          RGBA(255, 255, 255, 34), RGBA(255, 255, 255, 0));
+					// Subtle top glass sheen without washing out artwork
+					QuadVGrad(inX + 1.5f, inY + 1.5f, inW - 3.0f, (inH - 3.0f) * 0.28f,
+					          RGBA(255, 255, 255, 18), RGBA(255, 255, 255, 0));
 					RoundedBorder1(inX + 1.0f, inY + 1.0f, inW - 2.0f, inH - 2.0f, 6.0f,
-					               RGBA(255, 255, 255, 42));
+					               RGBA(255, 255, 255, 32));
 				}
 				else
 				{
@@ -2485,58 +2531,76 @@ std::string RunRomSelector()
 			// Authentic Nintendo 3DS Glowing Cyan 4-Corner Selection Cursor!
 			Draw3DSCornerCursor(s_hlX, s_hlY + slideY, kTileW, kTileH, 14.0f, homeCyan, homeCyanGlow);
 
-			// Page indicator dots if more than 6 ROMs
+			// Modern capsule page indicator dots if more than 6 ROMs
 			if (totalPages > 1)
 			{
-				const float dotsW = totalPages * 9.0f;
-				const float startX = 160.0f - dotsW * 0.5f;
-				for (int p = 0; p < totalPages && p < 12; ++p)
+				const int visPages = (totalPages < 12) ? totalPages : 12;
+				const float totalW = (visPages - 1) * 9.0f + 14.0f;
+				float px = 160.0f - totalW * 0.5f;
+				for (int p = 0; p < visPages; ++p)
 				{
-					Circle(startX + p * 9.0f + 4.0f, 195.5f, (p == pageIdx) ? 2.8f : 1.8f,
-					       (p == pageIdx) ? homeCyan : homeBorder);
+					if (p == pageIdx)
+					{
+						RoundedRect(px, 193.5f, 12.0f, 4.0f, 2.0f, homeCyan);
+						px += 16.0f;
+					}
+					else
+					{
+						Circle(px + 2.0f, 195.5f, 1.8f, homeBorder);
+						px += 8.0f;
+					}
 				}
 			}
 		}
 
 		// 3. Bottom Sculpted 3DS Bumper Buttons: [Settings (X)] & [Launch Game (A)] (y = 204..236)
 		{
-			// Left Bumper: Settings (X) — brushed dark slate pill
+			// Left Bumper: Settings (X) — themed brushed pill
 			const float bx0 = 8.0f, by0 = 204.0f, bw0 = 142.0f, bh0 = 32.0f;
-			RoundedRect(bx0, by0 + 2.0f, bw0, bh0, 12.0f, RGBA(8, 12, 20, 95));
-			RoundedRectVGrad(bx0, by0, bw0, bh0, 12.0f,
-			                 (pressedBumper == 0) ? homeBorder : (t.isLight ? RGBA(246, 249, 254) : RGBA(46, 53, 68)),
-			                 (pressedBumper == 0) ? homeTileOut : (t.isLight ? RGBA(224, 230, 240) : RGBA(30, 36, 48)));
-			RoundedBorder1(bx0, by0, bw0, bh0, 12.0f,
-			               t.isLight ? RGBA(184, 194, 210) : RGBA(82, 94, 116));
-			TextCentered(FONT_TITLE, bx0 + bw0 * 0.5f, by0 + 8.0f, "Settings (X)", homeText, 0.90f);
+			if ((t.cardShadow >> 24) > 0)
+				RoundedRect(bx0, by0 + 2.0f, bw0, bh0, 11.0f, t.cardShadow);
+			RoundedRectVGrad(bx0, by0, bw0, bh0, 11.0f,
+			                 (pressedBumper == 0) ? homeBorder : t.cardBgAlt,
+			                 (pressedBumper == 0) ? homeTileOut : t.cardBg);
+			RoundedBorder1(bx0, by0, bw0, bh0, 11.0f, homeBorder);
+			TextCentered(FONT_TITLE, bx0 + bw0 * 0.5f, by0 + 8.5f, "Settings (X)", homeText, 0.88f);
 
-			// Right Bumper: Launch Game (A) — cohesive official 3DS glossy cyan-blue pill!
+			// Right Bumper: Launch Game (A) — refined themed CTA pill
 			const float bx1 = 156.0f, by1 = 204.0f, bw1 = 156.0f, bh1 = 32.0f;
-			RoundedRect(bx1, by1 + 2.0f, bw1, bh1, 12.0f, RGBA(6, 22, 48, 120));
-			RoundedRectVGrad(bx1, by1, bw1, bh1, 12.0f,
-			                 (pressedBumper == 1) ? RGBA(18, 148, 224) : RGBA(28, 182, 250),
-			                 (pressedBumper == 1) ? RGBA(10, 92, 188)  : RGBA(12, 112, 224));
-			// Soft top glass highlight inside the rounded pill
-			RoundedRect(bx1 + 6.0f, by1 + 2.0f, bw1 - 12.0f, 11.0f, 5.5f, RGBA(255, 255, 255, 36));
-			RoundedBorder1(bx1, by1, bw1, bh1, 12.0f,
-			               (pressedBumper == 1) ? RGBA(255, 255, 255, 220) : RGBA(136, 234, 255, 210));
-			TextCentered(FONT_TITLE, bx1 + bw1 * 0.5f, by1 + 8.0f, "Launch Game (A)", RGBA(255, 255, 255), 0.90f);
+			if ((t.cardShadow >> 24) > 0)
+				RoundedRect(bx1, by1 + 2.0f, bw1, bh1, 11.0f, t.cardShadow);
+			const uint32_t ctaTop = (pressedBumper == 1) ? LerpColor(t.accent, RGBA(0, 0, 0), 0.2f) : t.accent;
+			const uint32_t ctaBot = (pressedBumper == 1) ? LerpColor(t.n64Blue, RGBA(0, 0, 0), 0.2f) : t.n64Blue;
+			RoundedRectVGrad(bx1, by1, bw1, bh1, 11.0f, ctaTop, ctaBot);
+			RoundedBorder1(bx1, by1, bw1, bh1, 11.0f,
+			               (pressedBumper == 1) ? RGBA(255, 255, 255, 200) : WithAlpha(LerpColor(t.accent, RGBA(255, 255, 255), 0.45f), 175));
+			TextCentered(FONT_TITLE, bx1 + bw1 * 0.5f, by1 + 9.5f, "Launch Game (A)", RGBA(8, 22, 48, 145), 0.88f);
+			TextCentered(FONT_TITLE, bx1 + bw1 * 0.5f, by1 + 8.5f, "Launch Game (A)", RGBA(255, 255, 255), 0.88f);
 		}
 
 		if (toastFrames > 0)
 		{
-			RoundedRect(64.0f, 174.0f, 192.0f, 22.0f, 10.0f, RGBA(14, 18, 26, 236));
-			RoundedBorder1(64.0f, 174.0f, 192.0f, 22.0f, 10.0f, homeCyan);
-			TextCentered(FONT_BODY, 160.0f, 178.5f, toast, RGBA(244, 248, 255), 0.84f);
+			RoundedRect(64.0f, 174.0f, 192.0f, 22.0f, 10.0f, WithAlpha(t.hintBg, 236));
+			RoundedBorder1(64.0f, 174.0f, 192.0f, 22.0f, 10.0f, WithAlpha(homeCyan, 185));
+			TextCentered(FONT_BODY, 160.0f, 178.5f, toast, t.hintText, 0.84f);
 			--toastFrames;
 		}
 
 		// ====================================================================
-		// TOP SCREEN (400x240): 3D N64 Box + 3D N64 Cartridge Virtual Console Stage
+		// TOP SCREEN (400x240): 3D N64 Box + 3D N64 Cartridge Stage
 		// ====================================================================
-		BeginScreen(GFX_TOP, 400, 240, RGBA(18, 21, 28));
+		BeginScreen(GFX_TOP, 400, 240, t.headerBg);
 		const FrontendRomInfo * selRom = (s_viewCount > 0) ? &s_roms[s_viewOrder[s_selected]] : nullptr;
-		DrawVirtualConsoleTopStage(selRom, s_previewTex, infoEase, s_vcAnimTime);
+		CRefPtr<CNativeTexture> stageCover = nullptr;
+		if (s_viewCount > 0)
+		{
+			const int selRomIdx = s_viewOrder[s_selected];
+			if (s_previewRomIdx == selRomIdx && s_previewTex != nullptr && s_previewTex->HasData())
+				stageCover = s_previewTex;
+			else if (s_gridTexRomIdx[selSlot] == selRomIdx && s_gridTex[selSlot] != nullptr && s_gridTex[selSlot]->HasData())
+				stageCover = s_gridTex[selSlot];
+		}
+		DrawVirtualConsoleTopStage(selRom, stageCover, infoEase, s_vcAnimTime, t);
 
 		if (scrapeSt.active && scrapeSt.total > 0)
 		{

@@ -435,24 +435,25 @@ void TexturedPolyQuad(C3D_Tex * tex,
 void Draw3DSCornerCursor(float x, float y, float w, float h, float radius,
                          uint32_t mainCol, uint32_t glowCol)
 {
-	// Outer soft cyan glow ring + 2px border
+	// Subtle outer halo + crisp 2px focus frame
 	RoundedRect(x - 2.0f, y - 2.0f, w + 4.0f, h + 4.0f, radius + 2.0f, glowCol);
 	RoundedBorder2(x - 1.0f, y - 1.0f, w + 2.0f, h + 2.0f, radius + 1.0f, mainCol);
-	// 4 sculpted corner L-brackets (signature Nintendo 3DS Home Menu selection cursor)
-	const float arm = 12.0f;
-	const float th  = 3.0f;
+	// 4 refined corner L-brackets (clean 3DS Home Menu focus reticle)
+	const float arm = 10.5f;
+	const float th  = 2.5f;
+	const float out = 3.0f;
 	// Top-Left
-	RoundedRect(x - 2.5f, y - 2.5f, arm, th, 1.5f, mainCol);
-	RoundedRect(x - 2.5f, y - 2.5f, th, arm, 1.5f, mainCol);
+	RoundedRect(x - out, y - out, arm, th, 1.25f, mainCol);
+	RoundedRect(x - out, y - out, th, arm, 1.25f, mainCol);
 	// Top-Right
-	RoundedRect(x + w + 2.5f - arm, y - 2.5f, arm, th, 1.5f, mainCol);
-	RoundedRect(x + w + 2.5f - th,  y - 2.5f, th, arm, 1.5f, mainCol);
+	RoundedRect(x + w + out - arm, y - out, arm, th, 1.25f, mainCol);
+	RoundedRect(x + w + out - th,  y - out, th, arm, 1.25f, mainCol);
 	// Bottom-Left
-	RoundedRect(x - 2.5f, y + h + 2.5f - th,  arm, th, 1.5f, mainCol);
-	RoundedRect(x - 2.5f, y + h + 2.5f - arm, th, arm, 1.5f, mainCol);
+	RoundedRect(x - out, y + h + out - th,  arm, th, 1.25f, mainCol);
+	RoundedRect(x - out, y + h + out - arm, th, arm, 1.25f, mainCol);
 	// Bottom-Right
-	RoundedRect(x + w + 2.5f - arm, y + h + 2.5f - th,  arm, th, 1.5f, mainCol);
-	RoundedRect(x + w + 2.5f - th,  y + h + 2.5f - arm, th, arm, 1.5f, mainCol);
+	RoundedRect(x + w + out - arm, y + h + out - th,  arm, th, 1.25f, mainCol);
+	RoundedRect(x + w + out - th,  y + h + out - arm, th, arm, 1.25f, mainCol);
 }
 
 void TexturedQuad(C3D_Tex * tex, float x, float y, float w, float h,

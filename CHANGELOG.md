@@ -4,6 +4,29 @@ All notable changes to **DaedalusX3D (Old 3DS Edition)** are documented in this 
 
 ---
 
+## [v0.1.3-Stable] — 2026-11-22
+
+Major UI/UX overhaul featuring a 3D Virtual Console-inspired ROM showcase, full 4-theme consistency across all screens, cover-caching fixes, bundled `romfs:/roms.ini` save database, and Old 3DS performance & ARM DynaRec stability improvements.
+
+### Frontend, 3D Showcase & Theme Polish (`Source/SysCTR/UI/`)
+- **3D N64 Retail Box & Blender-grade 3D N64 Cartridge showcase** (`FrontendCTR.cpp`, `N64CartridgeMesh.h`, `Tools/generate_n64_models.py`): dual floating 3D collectibles with perspective-subdivided box art, Blinn-Phong studio lighting, floor reflections, and smooth spring entrance animations on the top screen.
+- **2×3 3DS Home Menu Cartridge Shelf & Unified Settings/Pause Menu** (`FrontendCTR.cpp`, `UIRenderer.cpp`, `UIAtlas.cpp`, `TouchControllerCTR.cpp`): bottom-screen 2×3 tile grid with filter tabs (`All Games`, `Favorites`, `Recent`), capsule pagination, refined 4-corner selection reticle, and a unified tabbed menu (`States`, `CPU`, `Graphics`, `Audio`, `Touch`) with live option inspector and Old 3DS speed impact meter.
+- **Cleaner header & top-right branding**: removed the red `"NINTENDO 64 CLASSICS"` / `"SYSTEM SETTINGS"` header badges and added a unified minimal `DaedalusX3D | clock + battery` status pill in the top-right corner of both screens.
+- **Full 4-theme consistency (`Dark`, `Light`, `Midnight`, `Stealth`)**: wired every screen and component — including the top 3D studio stage, Save-State slot cards (`Slot 1–5`), folder tabs, left action rail, settings rows, inspector cards, scrollbars, and bumper buttons — to `ActiveTheme()`.
+- **Cover-ghosting fix when switching games**: `RequestPreviewForRom` now adopts covers already resident in the 2×3 grid cache (`s_gridTex`) immediately with zero delay, clears stale preview textures on ROM change, and strictly verifies `s_previewRomIdx` before rendering either the grid tile or the 3D box/cartridge.
+- **Updated 3DS Home Menu icon & banner** (`Source/SysCTR/Resources/icon.png`, `banner.png`).
+
+### Core, ARM DynaRec & Old 3DS Performance
+- **Bundled `romfs:/roms.ini` fallback** (`RomSettings.cpp`, `CMakeLists.txt`, `Resources/romfs/roms.ini`, `template.rsf`): embeds the full N64 SaveType database (EEPROM/SRAM/FlashRAM) directly into `.cia` and `.3dsx` builds so games save reliably even without manually copying `roms.ini` to the SD card, while keeping user overrides saved on SD.
+- **Fragment-cache invalidation & overlay safety** (`Dynamo.cpp`, `CPU.cpp`, `Fragment.cpp`): exits running ARM fragment chains (`CPU_CHANGE_CORE`) on I-cache invalidation and flushes pending full cache resets before fragment lookup to prevent stale code execution during large DMA/overlay loads (e.g., *GoldenEye 007* mission transitions), plus a VBL watchdog hook.
+- **ARM DynaRec & Old 3DS bandwidth pack** (`CodeGeneratorARM.cpp`, `DynarecStubARM.S`, `CodeBufferManagerARM.cpp`, `Citro3DContext.cpp`, `NativeTextureCTR.cpp`, `PicaTEVCombiner.cpp`, `RendererCTR.cpp`, `BaseRenderer.cpp`): enabled DynaRec loop optimisation by default on 3DS (`ConfigOptions.cpp`) alongside graphics/texture bandwidth and ROM cache improvements (`ROMBuffer.cpp`, `ROMFileCache.cpp`).
+
+### Release Artifacts
+- `DaedalusX64.3dsx` — Homebrew Launcher (`sdmc:/3ds/DaedalusX64/DaedalusX64.3dsx`)
+- `DaedalusX64.cia` — Home Menu installation via **FBI**
+
+---
+
 ## [v0.1.2-Stable] — 2026-11-22
 
 > **Note: The current frontend UI was based on [ctr64](https://github.com/gl91306/ctr64) by `gl91306` and will receive a full rework of both its visual assets and design eventually.**
